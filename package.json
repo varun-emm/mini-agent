@@ -1,0 +1,6 @@
+{
+  "name": "mini-agent",
+  "private": true,
+  "type": "module",
+  "description": "A tiny agent with tools, running on Groq, supervised by a blob."
+}
