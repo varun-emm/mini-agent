@@ -26,15 +26,15 @@ The answer flows in paragraph by paragraph, then the line settles into **Worked 
 
 The spinner is your animation, and it turns and pulses with the work:
 
-| What's happening | Spin | Pulse | Glow |
-|---|---|---|---|
-| Waiting for the model's first word | slow drift | slow, even breath | blue |
-| Thinking | clockwise | breath that quickens as words arrive | violet |
-| Searching, reading, looking at a screenshot | counter-clockwise | draws in (shrinks) on each beat | teal |
-| Making a file or running code | clockwise, fast | strong double heartbeat | pink |
-| Writing the answer | clockwise | gentle beat on each burst of words | blue |
+| What's happening | Spin | Pulse | Glow | Colour | See-through |
+|---|---|---|---|---|---|
+| Waiting for the model's first word | slow drift | slow, even breath | blue | faded, almost grey | most see-through (60–80%) |
+| Thinking | clockwise | breath that quickens as words arrive | violet | normal, richer on each breath | 72–95% |
+| Searching, reading, looking at a screenshot | counter-clockwise | draws in (shrinks) on each beat | teal | rich | fades on each inhale, fills back in |
+| Making a file or running code | clockwise, fast | strong double heartbeat | pink | most vivid | nearly solid (85–100%) |
+| Writing the answer | clockwise | gentle beat on each burst of words | blue | slightly rich | nearly solid |
 
-Speed follows how fast text is arriving, every finished step gives it a little pop, and it eases between moods. When the work is done it swells once and shrinks away.
+Speed, colour and see-through all follow how fast text is arriving, every finished step gives it a little pop (brighter and more solid), and it eases between moods. It never fades past 60% see-through while it works. When the work is done it swells once and shrinks away.
 
 ## It checks its own work
 

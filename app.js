@@ -537,7 +537,7 @@ function calculate(expression) {
 const python = {
   worker: null, seq: 0, pending: new Map(), warmed: false,
   start() {
-    this.worker = new Worker("py-worker.js?v=20261019c");
+    this.worker = new Worker("py-worker.js?v=20261019d");
     this.worker.onmessage = (e) => {
       const p = this.pending.get(e.data.id);
       if (!p) return;
@@ -1240,20 +1240,23 @@ const scrollDown = (force) => { if (force || nearBottom()) ui.chat.scrollTop = u
 // It eases between speeds (even through a change of direction) and spins down when done.
 // ---------------------------------------------------------------------------
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-// Each mood sets the spin (direction and base speed), the pulse (shape, depth, beats per second)
-// and the glow colour, picked from the colours in your animation.
+// Each mood sets the spin (direction and base speed), the pulse (shape, depth, beats per second),
+// the glow colour (picked from the colours in your animation), and the colour and see-through ranges:
+// sat = [calm, peak] saturation, op = [calm, peak] opacity. Each frame sits somewhere between the
+// two, set by the pulse, how fast text is arriving and any pop. Opacity never goes below 60%.
 //   breath    = a slow, even swell
 //   inhale    = it draws in (shrinks) on each beat: taking information in
 //   heartbeat = a strong double beat that pushes out: making something
 const LOADER_MOODS = {
-  waiting: { dir: 1, base: 0.35, shape: "breath", amp: 0.06, hz: 0.55, glow: [70, 140, 255] },
-  thinking: { dir: 1, base: 0.8, shape: "breath", amp: 0.07, hz: 1.05, glow: [150, 110, 255] },
-  forming: { dir: 1, base: 1.1, shape: "breath", amp: 0.07, hz: 1.7, glow: [90, 190, 255] },
-  pull: { dir: -1, base: 1.6, shape: "inhale", amp: 0.12, hz: 1.25, glow: [40, 225, 190] },
-  make: { dir: 1, base: 2.0, shape: "heartbeat", amp: 0.14, hz: 1.1, glow: [255, 80, 190] },
-  answer: { dir: 1, base: 0.9, shape: "breath", amp: 0.05, hz: 0.9, glow: [60, 130, 255] },
-  done: { dir: 1, base: 0, shape: "breath", amp: 0, hz: 0.5, glow: [70, 140, 255] },
+  waiting: { dir: 1, base: 0.35, shape: "breath", amp: 0.06, hz: 0.55, glow: [70, 140, 255], sat: [0.35, 0.75], op: [0.6, 0.8] },
+  thinking: { dir: 1, base: 0.8, shape: "breath", amp: 0.07, hz: 1.05, glow: [150, 110, 255], sat: [0.8, 1.35], op: [0.72, 0.95] },
+  forming: { dir: 1, base: 1.1, shape: "breath", amp: 0.07, hz: 1.7, glow: [90, 190, 255], sat: [0.95, 1.5], op: [0.8, 1] },
+  pull: { dir: -1, base: 1.6, shape: "inhale", amp: 0.12, hz: 1.25, glow: [40, 225, 190], sat: [1.1, 1.8], op: [0.62, 1], fade: true },
+  make: { dir: 1, base: 2.0, shape: "heartbeat", amp: 0.14, hz: 1.1, glow: [255, 80, 190], sat: [1.2, 2.1], op: [0.85, 1] },
+  answer: { dir: 1, base: 0.9, shape: "breath", amp: 0.05, hz: 0.9, glow: [60, 130, 255], sat: [0.9, 1.25], op: [0.85, 1] },
+  done: { dir: 1, base: 0, shape: "breath", amp: 0, hz: 0.5, glow: [70, 140, 255], sat: [1, 1.2], op: [0.92, 1] },
 };
+const MIN_LOADER_OPACITY = 0.6;   // the spinner never fades past 60% while it works
 const PULSE_SHAPES = {
   breath: (p) => (1 - Math.cos(2 * Math.PI * p)) / 2 - 0.35,
   inhale: (p) => -Math.pow(Math.sin(Math.PI * p), 3),
@@ -1275,6 +1278,8 @@ function makeLoader() {
   let amp = mood.amp, hz = mood.hz, shape = mood.shape;
   let kick = 0;          // extra swell from bursts of text and finished steps
   let glow = [...mood.glow];
+  let sat = [...mood.sat], op = [...mood.op];   // ranges ease toward the mood's, like the glow
+  let satNow = 1, opNow = 1;
   let pulseValue = 0;
   let raf = 0;
   let last = performance.now();
@@ -1293,15 +1298,30 @@ function makeLoader() {
     if (shape !== mood.shape && (phase % 1) < 0.08) shape = mood.shape;   // change shape on a beat boundary, no jolt
     phase = (phase + hz * dt) % 1;
     kick *= Math.exp(-dt * 6);
-    pulseValue = PULSE_SHAPES[shape](phase) * amp;
+    const raw = PULSE_SHAPES[shape](phase);
+    pulseValue = raw * amp;
     const scale = Math.max(0.82, Math.min(1.4, 1 + pulseValue + kick));
     for (let i = 0; i < 3; i++) glow[i] += (mood.glow[i] - glow[i]) * Math.min(1, dt * 3);
     const energy = Math.max(0, pulseValue / Math.max(amp, 0.01)) * 0.6 + Math.min(1, kick * 5);
     const blur = (2 + 7 * energy).toFixed(1);
     const alpha = (0.18 + 0.45 * Math.min(1, energy)).toFixed(2);
+    // colour and see-through: how strong this beat is (0..1), plus how hard text is pouring in and any pop
+    const beat = Math.max(0, Math.min(1, shape === "breath" ? raw + 0.35 : Math.abs(raw)));
+    const level = Math.max(0, Math.min(1, 0.6 * beat + 0.3 * Math.min(1, boost / 2.4) + kick * 3));
+    for (let i = 0; i < 2; i++) {
+      sat[i] += (mood.sat[i] - sat[i]) * Math.min(1, dt * 3);
+      op[i] += (mood.op[i] - op[i]) * Math.min(1, dt * 3);
+    }
+    satNow += (sat[0] + (sat[1] - sat[0]) * level - satNow) * Math.min(1, dt * 12);
+    // searching "draws in": it turns more see-through on each inhale, then fills back in
+    const opLevel = mood.fade ? Math.max(0, Math.min(1, 1 - beat + kick * 3)) : level;
+    opNow += (op[0] + (op[1] - op[0]) * opLevel - opNow) * Math.min(1, dt * 12);
+    opNow = Math.max(MIN_LOADER_OPACITY, Math.min(1, opNow));
     if (!stopping) {
       wrap.style.transform = `scale(${scale.toFixed(3)})`;
       wrap.style.filter = `drop-shadow(0 0 ${blur}px rgba(${glow.map((c) => c | 0).join(",")},${alpha}))`;
+      img.style.filter = `saturate(${satNow.toFixed(2)})`;
+      img.style.opacity = opNow.toFixed(2);
     }
     if (stopping && Math.abs(rate) < 0.02) { raf = 0; return; }
     raf = requestAnimationFrame(tick);
@@ -1316,6 +1336,8 @@ function makeLoader() {
     get direction() { return rate < 0 ? -1 : 1; },
     get rate() { return rate; },
     get scale() { return 1 + pulseValue + kick; },
+    get saturation() { return satNow; },
+    get opacity() { return opNow; },
     async spinDown() {
       mood = LOADER_MOODS.done; kick = Math.min(0.3, kick + 0.2); run();               // one last swell...
       await new Promise((r) => setTimeout(r, reduceMotion ? 0 : 600));
