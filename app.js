@@ -319,15 +319,42 @@ function apiError(status, err, model) {
   if (code === "tool_use_failed" || /tool_use_failed/.test(e.message || "")) return new AgentError(e.message || "Malformed tool call", "tool_use_failed");
   if (status === 401) return new AgentError(`${name} rejected the API key. Check it in Settings.`, "auth");
   if (status === 402) return new AgentError(`Your ${name} account is out of credits. Top up, or pick a cheaper model in Settings.`, "credits");
-  if (status === 429) return new AgentError(`${name}'s rate limit was hit. Wait a minute, then try again.`, "rate");
+  if (status === 429) {
+    const when = (((e.message || "").match(/try again in\s*([\dhms.]+)/i) || [])[1] || "").replace(/\.+$/, "");
+    return new AgentError(`${name}'s rate limit was hit${when ? ` (it says to try again in ${when})` : ""}. Wait, then tap Try again. ` +
+      (name === "Groq" ? "Groq's free tier allows only a few requests per minute; an OpenRouter key avoids this." : ""), "rate");
+  }
   if (status === 404 && /model/i.test(e.message || "")) {
     return new AgentError(`${name} doesn't recognise the model "${model}", or it can't use tools. Pick another model in Settings.`, "model");
   }
   return new AgentError(`${name} returned an error (${status}): ${e.message || "unknown error"}`, code || "http");
 }
 
+// Rate limits: wait as long as the provider asks (up to ~45s, a few times), then try again by itself.
+let rateNotice = null;   // set while a turn runs, so the status line can say what's happening
+const waitFor = (ms, signal) => new Promise((resolve, reject) => {
+  const t = setTimeout(resolve, ms);
+  if (signal) signal.addEventListener("abort", () => { clearTimeout(t); reject(new DOMException("Stopped", "AbortError")); }, { once: true });
+});
+async function postWithRetry(body, signal) {
+  for (let attempt = 0; ; attempt++) {
+    const res = await postLLM(body, signal);
+    if (res.status !== 429 || attempt >= 3) return res;
+    let text = "";
+    try { text = await res.clone().text(); } catch (_) { /* ignore */ }
+    let wait = Number(res.headers.get("retry-after")) || 0;
+    const m = text.match(/try again in\s*(?:(\d+)m)?\s*([\d.]+)\s*(ms|s)\b/i);
+    if (m) wait = Number(m[1] || 0) * 60 + (m[3].toLowerCase() === "ms" ? Number(m[2]) / 1000 : Number(m[2]));
+    if (!wait) wait = 5 * (attempt + 1);
+    if (wait > 45) return res;                       // a long wait (daily limit): report it instead
+    wait = Math.ceil(wait + 0.5);
+    if (rateNotice) rateNotice(wait, attempt + 1);
+    await waitFor(wait * 1000, signal);
+  }
+}
+
 async function callLLM(body, signal) {
-  const res = await postLLM(body, signal);
+  const res = await postWithRetry(body, signal);
   let data = null;
   try { data = await res.json(); } catch (_) { /* non-JSON */ }
   const err = (data && data.error) || null;
@@ -341,7 +368,7 @@ async function callLLM(body, signal) {
 // Streaming version: reports thinking, answer text and tool calls as they are written.
 // on = { reasoning(chunk, all), content(chunk, all), tool(call, index), first() }
 async function streamLLM(body, signal, on = {}) {
-  const res = await postLLM({ ...body, stream: true }, signal);
+  const res = await postWithRetry({ ...body, stream: true }, signal);
   const msg = { content: "", reasoning: "", tool_calls: [] };
   const fire = (name, ...a) => { try { on[name] && on[name](...a); } catch (_) { /* UI errors never break the loop */ } };
   const type = res.headers.get("content-type") || "";
@@ -510,7 +537,7 @@ function calculate(expression) {
 const python = {
   worker: null, seq: 0, pending: new Map(), warmed: false,
   start() {
-    this.worker = new Worker("py-worker.js");
+    this.worker = new Worker("py-worker.js?v=20261019c");
     this.worker.onmessage = (e) => {
       const p = this.pending.get(e.data.id);
       if (!p) return;
@@ -985,6 +1012,7 @@ Making files (the user can preview, download and share them):
 - Python has no internet access. Get any data you need with web_search first, then put it in the code.
 - After making a file, check it (reopen it in Python and print a short summary) before finishing.
 - Files appear to the user automatically, so don't paste their contents into your answer. Name each file and say in a line what's in it.
+- The user is usually on a phone. HTML files (games, pages, tools) open and run right inside this app when the user taps the file card, so say "tap the file to open it", not "double-click" or "drag into a browser". Make HTML pages work with touch and fit a phone screen.
 
 Checking your work with screenshots:
 - You have a screenshot tool. After you make a chart, PDF, Word, Excel, CSV or HTML file, take a screenshot of it and ask a specific question (is the title right, are labels readable, do the totals match, is anything cut off or empty).
@@ -1019,6 +1047,7 @@ async function runTurn(text) {
   const started = Date.now();
   const before = files.snapshot();
 
+  rateNotice = (secs, n) => view.progress(`${provider().name} asked us to slow down. Trying again in ${secs}s${n > 1 ? ` (attempt ${n + 1})` : ""}`);
   state.running = true;
   state.abort = new AbortController();
   const signal = state.abort.signal;
@@ -1110,6 +1139,7 @@ async function runTurn(text) {
       await finish({ kind: "error", text: e.message, retry: text });
     }
   } finally {
+    rateNotice = null;
     state.running = false;
     state.abort = null;
     setRunningUI(false);
@@ -1604,7 +1634,7 @@ function liveTurn(turn) {
       row.classList.remove("turn-in");
       state.log.push(turn);
       scrollDown();
-      await spin;
+      spin.catch(() => {});   // the loader winds down on its own; the app is ready for the next message right away
     },
   };
 }

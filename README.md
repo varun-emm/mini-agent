@@ -79,6 +79,8 @@ You can save both keys and switch between them in **Settings → Provider**. Eac
 
 On OpenRouter, any model that supports tool calling works. Filter by "Tools" at https://openrouter.ai/models.
 
+Groq's free tier allows only a few requests per minute, and an agent makes several per question. When Groq asks it to slow down, Mini Agent waits the time Groq gives (up to about 45 seconds) and tries again by itself. For longer limits, it tells you when to try again. If you hit this often, use an OpenRouter key.
+
 ## If it says "Couldn't reach Groq"
 
 Some APIs refuse calls made directly from a web page (this is called CORS). OpenRouter allows them, so the easiest fix is to switch to an OpenRouter key. To stay on Groq, deploy the included relay for free:
