@@ -1,6 +1,6 @@
 # Mini Agent
 
-A tiny AI agent that runs in your browser on [Groq](https://groq.com) or [OpenRouter](https://openrouter.ai). It thinks, uses tools, checks its work, and loops until the job is done, while a pink blob makes faces at you.
+A tiny AI agent that runs in your browser on [Groq](https://groq.com) or [OpenRouter](https://openrouter.ai). It thinks, uses tools, checks its work, loops until the job is done, and hands you real files: Excel, Word, PDF, PowerPoint, charts and more.
 
 **Open it:** https://varun-emm.github.io/mini-agent/ (after the one-time setup below)
 
@@ -11,11 +11,20 @@ A tiny AI agent that runs in your browser on [Groq](https://groq.com) or [OpenRo
 | Web search | Groq: its `groq/compound-mini` model, which has search built in. OpenRouter: its `web` plugin (a small extra fee per search) |
 | Read a web page | Reads one URL in detail |
 | Calculator | Exact maths, so the model never guesses numbers |
-| Python | Runs real Python in your browser with [Pyodide](https://pyodide.org) (numpy and pandas work). Asks before running |
-| Files | Writes, reads and lists files. Download them from Settings |
+| Python | Runs real Python in your browser with [Pyodide](https://pyodide.org). Libraries like openpyxl, python-docx, python-pptx and fpdf2 install by themselves the first time they're used |
+| Files | Makes Excel, Word, PDF, PowerPoint, PNG charts, CSV, Markdown, HTML, JSON, code and ZIP files |
 | Time | Knows today's date |
 
-Tap **See how it got there** under any answer to see every thought, tool call and result.
+While it works, a line in the chat says what it's actually doing ("Searching the web for…", "Installing python-docx", "Creating gst_summary.xlsx"), next to a spinner that speeds up as more steps get done. When it finishes, that line folds into **Worked for 12s**. Tap it to see every step and its output.
+
+## Files
+
+Every file the agent makes shows up under its answer as a card. Charts and images are shown full size.
+
+- **Tap a card** to preview it. Excel sheets, Word documents, PDFs, CSVs, images, Markdown and code all preview in the app. PowerPoint files don't preview, but you can still share or download them.
+- **Share** (iPhone and Android) opens the system share sheet: Save to Files, AirDrop, WhatsApp, Mail.
+- **Download** saves the file to your device.
+- Files are kept on your device (in the browser's storage) between visits. Manage them in **Settings → Files**.
 
 ## One-time setup
 
@@ -65,13 +74,15 @@ The model only ever writes text. `app.js` is the **harness** around it:
 | System prompt | `systemPrompt()` |
 | Context management | `trimHistory()` drops the oldest turns when the chat gets long |
 | Error recovery | tool errors go back to the model, and malformed tool calls are retried |
-| Human approval | the "Run this Python?" dialog |
-| The blob's moods and lines | `LINES`, `TOOL_LINES` in `app.js`, plus the animations in `styles.css` |
+| Status line | `describe()` turns each tool call into plain English |
+| File handling | `files` (stored in IndexedDB), `syncFromPython()`, `openPreview()` |
+| Python sandbox | `py-worker.js`, which installs libraries and auto-saves unsaved charts |
+| Human approval | optional "Run this code?" alert (Settings → Ask before running code) |
 
 ## Make it yours
 
 - **Add a tool:** write an async function in `TOOL_FUNCTIONS`, then describe it in `TOOLS`. That's all an "integration" is.
-- **More silly lines:** add to `LINES` and `TOOL_LINES` in `app.js`.
+- **Change the status wording:** edit `describe()` in `app.js`.
 - **Different brain:** change the provider or model in Settings. Any model ID that supports tools works.
 - **Another provider:** any OpenAI-compatible API can be added as one more entry in `PROVIDERS`.
 
@@ -89,4 +100,5 @@ python cli/agent.py
 
 - Your key lives in your browser's local storage. Use **Settings → Forget my key** on shared devices.
 - Set a spend limit in the Groq console, or a credit limit on your OpenRouter key. Agent loops use more tokens than plain chat.
-- Python runs inside a sandbox in your browser and can only touch the agent's own files.
+- Python runs inside a sandbox in your browser. It has no internet access and can only touch the agent's own files, so it runs without asking. Turn on **Ask before running code** if you'd rather approve each run.
+- The first time Python runs, the browser downloads it (about 10 MB). After that it's cached.

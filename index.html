@@ -2,159 +2,155 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <title>Mini Agent</title>
-  <meta name="description" content="A tiny agent with tools, running on Groq or OpenRouter, supervised by a blob.">
-  <meta name="theme-color" content="#DCE6D2" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#1C1930" media="(prefers-color-scheme: dark)">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 8C78 8 94 28 94 54C94 82 76 94 50 94C24 94 6 82 6 54C6 28 22 8 50 8Z' fill='%23FF8FB1' stroke='%2326213F' stroke-width='6'/%3E%3Ccircle cx='36' cy='50' r='11' fill='white' stroke='%2326213F' stroke-width='4'/%3E%3Ccircle cx='64' cy='50' r='11' fill='white' stroke='%2326213F' stroke-width='4'/%3E%3Ccircle cx='39' cy='52' r='5' fill='%2326213F'/%3E%3Ccircle cx='61' cy='47' r='5' fill='%2326213F'/%3E%3C/svg%3E">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&display=swap" rel="stylesheet">
+  <meta name="description" content="A small AI agent with tools that makes real files, running on Groq or OpenRouter.">
+  <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Mini Agent">
+  <link rel="icon" type="image/png" href="assets/icon.png">
+  <link rel="apple-touch-icon" href="assets/icon.png">
+  <link rel="preload" href="assets/loader.webp" as="image">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
   <div class="app">
-    <header class="top">
-      <div class="titlebar">
-        <h1 class="wordmark">Mini Agent</h1>
-        <div class="top-actions">
-          <button class="icon-btn" id="newChatBtn" type="button" aria-label="New chat" title="New chat">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
-          </button>
-          <button class="icon-btn" id="settingsBtn" type="button" aria-label="Settings and files" title="Settings and files">
-            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
-          </button>
-        </div>
-      </div>
-
-      <div class="stage" id="stage" data-phase="idle">
-        <svg class="blob-svg" viewBox="0 0 170 130" role="img" aria-labelledby="blobTitle">
-          <title id="blobTitle">The agent, a pink blob with googly eyes</title>
-          <!-- thought bubbles (thinking) -->
-          <g class="prop thoughts">
-            <circle class="tb tb1" cx="124" cy="34" r="4"/>
-            <circle class="tb tb2" cx="136" cy="22" r="6"/>
-            <circle class="tb tb3" cx="152" cy="10" r="8"/>
-          </g>
-          <!-- wrench (acting) -->
-          <g class="prop wrench-orbit">
-            <g class="wrench">
-              <path d="M112 84 l11 -11 a6 6 0 1 1 5 5 l-11 11 z"/>
-              <circle cx="127" cy="74" r="2.6" class="wrench-hole"/>
-            </g>
-          </g>
-          <!-- magnifier (observing) -->
-          <g class="prop magnifier">
-            <line x1="146" y1="92" x2="162" y2="110"/>
-            <circle cx="138" cy="82" r="13"/>
-          </g>
-          <!-- confetti (done) -->
-          <g class="prop confetti">
-            <rect class="cf cf1" x="30" y="6" width="6" height="10" rx="1"/>
-            <rect class="cf cf2" x="62" y="0" width="6" height="10" rx="1"/>
-            <rect class="cf cf3" x="98" y="4" width="6" height="10" rx="1"/>
-            <rect class="cf cf4" x="120" y="10" width="6" height="10" rx="1"/>
-          </g>
-          <g id="blob" class="blob">
-            <line class="antenna-stalk" x1="66" y1="18" x2="74" y2="4"/>
-            <circle class="antenna-ball" cx="75" cy="4" r="4.5"/>
-            <path class="body" d="M66 18C98 18 118 40 118 70C118 102 96 120 66 120C34 120 14 102 14 70C14 40 34 18 66 18Z"/>
-            <ellipse class="cheek" cx="36" cy="86" rx="7" ry="4"/>
-            <ellipse class="cheek" cx="96" cy="86" rx="7" ry="4"/>
-            <g class="eye eye-l">
-              <circle class="sclera" cx="50" cy="62" r="13"/>
-              <circle class="pupil" cx="52" cy="64" r="5.5"/>
-              <path class="x-eye" d="M44 56l12 12M56 56l-12 12"/>
-            </g>
-            <g class="eye eye-r">
-              <circle class="sclera" cx="83" cy="62" r="13"/>
-              <circle class="pupil" cx="80" cy="60" r="5.5"/>
-              <path class="x-eye" d="M77 56l12 12M89 56l-12 12"/>
-            </g>
-            <path class="mouth" id="mouth" d="M56 92 Q66 100 76 92"/>
-          </g>
-        </svg>
-        <p class="speech" id="speech" aria-live="polite">Poke me with a question.</p>
-      </div>
+    <header class="nav">
+      <button class="glass-btn" id="newChatBtn" type="button" aria-label="New chat">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-6"/><path d="M17.6 3.6a2 2 0 0 1 2.8 2.8L12 14.8 8.8 15.2l.4-3.2Z"/></svg>
+      </button>
+      <button class="nav-title" id="titleBtn" type="button" aria-label="Model and settings">
+        <span class="nav-name">Mini Agent</span>
+        <span class="nav-sub" id="subtitle"></span>
+      </button>
+      <button class="glass-btn" id="settingsBtn" type="button" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z"/></svg>
+      </button>
     </header>
 
-    <main class="chat" id="chat" aria-live="polite"></main>
+    <main class="chat" id="chat">
+      <div class="thread" id="thread" aria-live="polite"></div>
+    </main>
 
+    <div class="bottom-edge" aria-hidden="true"></div>
     <form class="composer" id="composer" autocomplete="off">
       <label for="input" class="sr-only">Message</label>
-      <textarea id="input" rows="1" placeholder="Ask, or give it a job to do"></textarea>
-      <button class="send" id="sendBtn" type="submit">Send</button>
+      <textarea id="input" rows="1" placeholder="Ask anything"></textarea>
+      <button class="send" id="sendBtn" type="submit" aria-label="Send" disabled>
+        <svg class="i-send" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+        <svg class="i-stop" viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
+      </button>
     </form>
   </div>
 
-  <!-- Settings sheet -->
+  <!-- Settings -->
   <dialog class="sheet" id="settings" aria-labelledby="settingsTitle">
-    <form method="dialog" class="sheet-inner" id="settingsForm">
-      <div class="sheet-head">
-        <h2 id="settingsTitle">Settings</h2>
-        <button class="icon-btn" value="close" aria-label="Close settings">
-          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-        </button>
+    <div class="sheet-bar">
+      <span></span>
+      <h2 id="settingsTitle">Settings</h2>
+      <button class="bar-btn strong" id="settingsDone" type="button">Done</button>
+    </div>
+    <div class="sheet-scroll">
+      <div class="group">
+        <div class="group-head">Provider</div>
+        <div class="cells">
+          <div class="cell">
+            <div class="segmented" id="providerSeg" role="tablist" aria-label="Provider">
+              <button type="button" role="tab" data-p="groq">Groq</button>
+              <button type="button" role="tab" data-p="openrouter">OpenRouter</button>
+            </div>
+          </div>
+          <label class="cell cell-input">
+            <span class="sr-only">API key</span>
+            <input id="keyInput" type="password" spellcheck="false" autocapitalize="off" autocomplete="off">
+            <button type="button" class="bar-btn" id="toggleKey">Show</button>
+          </label>
+        </div>
+        <div class="group-foot" id="keyFooter"></div>
       </div>
 
-      <fieldset class="seg">
-        <legend>Provider</legend>
-        <label><input type="radio" name="provider" value="groq"><span>Groq</span></label>
-        <label><input type="radio" name="provider" value="openrouter"><span>OpenRouter</span></label>
-      </fieldset>
-
-      <label class="field">
-        <span id="keyLabel">Groq API key</span>
-        <span class="key-row">
-          <input id="keyInput" type="password" placeholder="gsk_..." spellcheck="false" autocapitalize="off">
-          <button type="button" class="ghost" id="toggleKey">Show</button>
-        </span>
-        <small>Saved only in this browser, and only ever sent to <span id="keyDest">Groq</span>. <a id="keyLink" href="https://console.groq.com/keys" target="_blank" rel="noopener">Get a key</a></small>
-      </label>
-
-      <label class="field">
-        <span>Model</span>
-        <input id="modelInput" list="models" spellcheck="false" autocapitalize="off">
-        <datalist id="models"></datalist>
-        <small>The brain. Pick a suggestion, or type any <span id="modelHint">Groq</span> model ID that supports tools.</small>
-      </label>
-
-      <label class="check">
-        <input id="autoRunInput" type="checkbox">
-        <span>Run Python without asking me first</span>
-      </label>
-
-      <details class="advanced" id="relaySection">
-        <summary>Groq relay (only if direct calls fail)</summary>
-        <label class="field">
-          <span>Relay URL</span>
-          <input id="relayInput" type="url" placeholder="https://your-app.vercel.app/api/chat" spellcheck="false" autocapitalize="off">
-          <small>Leave empty to call Groq directly. OpenRouter never needs this. See the README for the free relay.</small>
-        </label>
-      </details>
-
-      <section class="files">
-        <h3>Files the agent made</h3>
-        <ul id="fileList" class="file-list"></ul>
-      </section>
-
-      <div class="sheet-actions">
-        <button type="button" class="ghost danger" id="forgetKey">Forget my key</button>
-        <button type="submit" class="primary" id="saveSettings" value="save">Save</button>
+      <div class="group">
+        <div class="group-head">Model</div>
+        <div class="cells">
+          <div id="modelList" role="radiogroup" aria-label="Model"></div>
+          <label class="cell cell-input">
+            <span class="sr-only">Other model</span>
+            <input id="customModel" placeholder="Other model ID" spellcheck="false" autocapitalize="off" autocomplete="off">
+          </label>
+        </div>
+        <div class="group-foot">Any model that supports tool calling works.</div>
       </div>
-    </form>
+
+      <div class="group">
+        <div class="cells">
+          <label class="cell cell-toggle">
+            <span>Ask before running code</span>
+            <input type="checkbox" class="switch" id="askInput">
+          </label>
+        </div>
+        <div class="group-foot">Code runs in a sandbox inside this browser and can only touch the files it makes.</div>
+      </div>
+
+      <div class="group" id="filesGroup" hidden>
+        <div class="group-head">Files</div>
+        <div class="cells" id="fileRows"></div>
+        <div class="cells spaced">
+          <button type="button" class="cell cell-danger" id="clearFilesBtn">Delete all files</button>
+        </div>
+      </div>
+
+      <div class="group" id="relayGroup">
+        <div class="group-head">Groq relay</div>
+        <div class="cells">
+          <label class="cell cell-input">
+            <span class="sr-only">Relay URL</span>
+            <input id="relayInput" type="url" placeholder="https://your-app.vercel.app/api/chat" spellcheck="false" autocapitalize="off">
+          </label>
+        </div>
+        <div class="group-foot">Only needed if Groq blocks calls from web pages. See the README.</div>
+      </div>
+
+      <div class="group">
+        <div class="cells">
+          <button type="button" class="cell cell-danger" id="forgetBtn">Forget key</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- File preview -->
+  <dialog class="sheet tall" id="preview" aria-labelledby="previewTitle">
+    <div class="sheet-bar">
+      <button class="bar-btn strong" id="previewDone" type="button">Done</button>
+      <div class="bar-title">
+        <h2 id="previewTitle"></h2>
+        <span id="previewSub"></span>
+      </div>
+      <button class="bar-btn icon-only" id="shareBtn" type="button" aria-label="Share">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M8 7l4-4 4 4M5 12v8h14v-8"/></svg>
+      </button>
+    </div>
+    <div class="sheet-scroll preview-body" id="previewBody"></div>
+    <div class="sheet-tools">
+      <button class="tool-btn danger" id="deleteBtn" type="button">Delete</button>
+      <button class="tool-btn" id="downloadBtn" type="button">Download</button>
+    </div>
   </dialog>
 
   <!-- Code approval -->
-  <dialog class="sheet" id="approve" aria-labelledby="approveTitle">
-    <form method="dialog" class="sheet-inner">
-      <h2 id="approveTitle">Run this Python?</h2>
-      <p class="hint">The agent wants to run this code in your browser. It can only touch its own files.</p>
-      <pre class="code" id="approveCode"></pre>
-      <div class="sheet-actions">
-        <button value="no" class="ghost">Don't run</button>
-        <button value="yes" class="primary">Run it</button>
+  <dialog class="alert" id="approve" aria-labelledby="approveTitle">
+    <form method="dialog">
+      <div class="alert-body">
+        <h2 id="approveTitle">Run this code?</h2>
+        <p>It runs in a sandbox in this browser.</p>
+        <pre class="alert-code" id="approveCode"></pre>
+      </div>
+      <div class="alert-actions">
+        <button value="no">Don't Run</button>
+        <button value="yes" class="strong">Run</button>
       </div>
     </form>
   </dialog>

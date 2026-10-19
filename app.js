@@ -25,11 +25,13 @@ const PROVIDERS = {
     models: [["openai/gpt-oss-120b", "Cheap and capable"], ["anthropic/claude-sonnet-5.5", "Smarter, costs more"]],
   },
 };
-const GROQ_URL = PROVIDERS.groq.url;
-const MAX_STEPS = 15;
+const MAX_STEPS = 20;
 const MAX_TOOL_OUTPUT = 6000;
 const MAX_HISTORY_CHARS = 60000;
 
+// ---------------------------------------------------------------------------
+// Settings & chat storage (localStorage, this browser only)
+// ---------------------------------------------------------------------------
 const store = {
   get(key, fallback) {
     try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); }
@@ -48,25 +50,23 @@ function loadSettings() {
     provider: "groq",
     keys: { groq: "", openrouter: "" },
     models: { groq: PROVIDERS.groq.defaultModel, openrouter: PROVIDERS.openrouter.defaultModel },
-    autoRun: false,
+    askBeforeCode: false,
     relayUrl: "",
   };
-  // settings saved by the first version (one Groq key + one model)
-  if (typeof saved.apiKey === "string") s.keys.groq = saved.apiKey;
+  if (typeof saved.apiKey === "string") s.keys.groq = saved.apiKey;            // first version
   if (typeof saved.model === "string" && saved.model) s.models.groq = saved.model;
   if (PROVIDERS[saved.provider]) s.provider = saved.provider;
   Object.assign(s.keys, saved.keys || {});
   Object.assign(s.models, saved.models || {});
-  if (typeof saved.autoRun === "boolean") s.autoRun = saved.autoRun;
+  if (typeof saved.askBeforeCode === "boolean") s.askBeforeCode = saved.askBeforeCode;
   if (typeof saved.relayUrl === "string") s.relayUrl = saved.relayUrl;
-  if (!s.keys[s.provider]) {   // land on whichever provider actually has a key
+  if (!s.keys[s.provider]) {
     const withKey = Object.keys(PROVIDERS).find((p) => s.keys[p]);
     if (withKey) s.provider = withKey;
   }
   return s;
 }
 
-// Guess the provider from what a key looks like.
 function detectProvider(key) {
   if (key.startsWith(PROVIDERS.openrouter.keyPrefix)) return "openrouter";
   if (key.startsWith(PROVIDERS.groq.keyPrefix)) return "groq";
@@ -77,7 +77,6 @@ const state = {
   settings: loadSettings(),
   history: store.get("ma.history", []),   // what the model sees (without the system prompt)
   log: store.get("ma.log", []),           // what the chat shows
-  files: store.get("ma.files", {}),       // the agent's workspace
   running: false,
   abort: null,
 };
@@ -85,151 +84,125 @@ const state = {
 const provider = () => PROVIDERS[state.settings.provider];
 const apiKey = () => state.settings.keys[state.settings.provider] || "";
 const currentModel = () => state.settings.models[state.settings.provider] || provider().defaultModel;
-
 const save = {
   settings: () => store.set("ma.settings", state.settings),
   chat: () => { store.set("ma.history", state.history); store.set("ma.log", state.log); },
-  files: () => {
-    if (!store.set("ma.files", state.files)) toastError("Browser storage is full, so the newest files won't survive a refresh.");
-  },
 };
 
 // ---------------------------------------------------------------------------
-// The blob: phases, mouths, and deeply unserious status lines
+// Files: raw bytes kept in IndexedDB, so Excel/Word/PDF/images survive intact
 // ---------------------------------------------------------------------------
-const LINES = {
-  idle: [
-    "Poke me with a question.",
-    "I'm a blob with tools. Ask me stuff.",
-    "Awaiting orders, captain.",
-    "I contain multitudes. Mostly jelly.",
-  ],
-  thinking: [
-    "Consulting the council of hamsters…",
-    "Rotating my brain 90 degrees…",
-    "Microwaving thoughts on high…",
-    "Bribing neurons with biscuits…",
-    "Untangling spaghetti logic…",
-    "Asking my imaginary friend Gary…",
-    "Defragmenting my vibes…",
-    "Loading opinions.exe…",
-    "Doing maths with my toes…",
-    "Having a small existential crisis…",
-    "Petting the GPU for luck…",
-    "Arguing with myself. I'm winning.",
-    "Chai break for the neurons…",
-    "Summoning the ancient autocomplete…",
-    "Thinking so hard my antenna is smoking…",
-    "Shaking the magic 8-ball politely…",
-  ],
-  patience: [
-    "Still here. The hamsters unionised.",
-    "This one's chewy. Hold on.",
-    "Gary is being difficult today.",
-    "My brain is buffering. Classic.",
-  ],
-  observing: [
-    "Sniffing the results…",
-    "Hmm. Interesting. Suspicious, even.",
-    "Reading this with one eye closed…",
-    "Chewing on the data…",
-    "Squinting like a detective…",
-    "Checking if the answer is lying to me…",
-  ],
-  done: [
-    "Ta-da. Please clap.",
-    "Done! I'd like a biscuit now.",
-    "Finished. Rate me five bananas.",
-    "Nailed it. Probably. I checked.",
-  ],
-  error: [
-    "I have melted. Details below.",
-    "Oops. Brain fell out.",
-    "Something went sideways.",
-  ],
-  stopped: ["Okay okay, I stopped.", "Halted mid-wobble."],
-};
+const enc = new TextEncoder();
+const dec = new TextDecoder();
 
-const TOOL_LINES = {
-  web_search: ["Yelling into the internet…", "Rummaging through the web's junk drawer…", "Googling like a confused uncle…"],
-  fetch_webpage: ["Licking the webpage to see how it tastes…", "Speed-reading at 900 words a blink…"],
-  calculator: ["Counting on all eleven fingers…", "Abacus go brrr…", "Carrying the one. Dropped it. Got it."],
-  run_python: ["Poking the python with a stick…", "Feeding code to the snake…", "Hoping the snake is friendly…"],
-  write_file: ["Scribbling on a digital napkin…", "Writing it down before I forget…"],
-  read_file: ["Squinting at the file…", "Reading the fine print…"],
-  list_files: ["Rummaging through my backpack…"],
-  get_current_time: ["Asking the sundial…", "Licking a finger, checking the wind…"],
-  harness: ["Re-asking myself, but nicer…"],
-};
-
-const MOUTHS = {
-  idle: "M56 92 Q66 100 76 92",
-  thinking: "M54 94 Q59 89 64 94 Q69 99 74 94 Q77 91 79 93",
-  acting: "M55 93 L77 93",
-  observing: "M62 93 Q66 89 70 93 Q66 97 62 93",
-  done: "M52 88 Q66 106 80 88 Z",
-  error: "M54 98 Q66 88 78 98",
-  stopped: "M56 94 Q66 92 76 95",
-};
-
-const ui = {
-  stage: document.getElementById("stage"),
-  speech: document.getElementById("speech"),
-  mouth: document.getElementById("mouth"),
-  chat: document.getElementById("chat"),
-  form: document.getElementById("composer"),
-  input: document.getElementById("input"),
-  send: document.getElementById("sendBtn"),
-};
-
-const blob = {
-  timer: null, settleTimer: null, phase: "idle", since: 0, last: "",
-  pick(pool) {
-    const options = pool.filter((l) => l !== this.last);
-    const line = options[Math.floor(Math.random() * options.length)] || pool[0];
-    this.last = line;
-    return line;
-  },
-  say(text) {
-    ui.speech.textContent = text;
-    ui.speech.classList.remove("pop");
-    void ui.speech.offsetWidth;   // restart the pop animation
-    ui.speech.classList.add("pop");
-  },
-  set(phase, tool) {
-    clearInterval(this.timer);
-    clearTimeout(this.settleTimer);
-    this.phase = phase;
-    this.since = Date.now();
-    const visual = phase === "stopped" ? "idle" : phase;
-    ui.stage.dataset.phase = visual;
-    ui.mouth.setAttribute("d", MOUTHS[phase] || MOUTHS.idle);
-    const pool = phase === "acting" ? (TOOL_LINES[tool] || LINES.thinking) : (LINES[phase] || LINES.idle);
-    this.say(this.pick(pool));
-    if (["thinking", "acting", "observing"].includes(phase)) {
-      this.timer = setInterval(() => {
-        const slow = phase === "thinking" && Date.now() - this.since > 9000;
-        this.say(this.pick(slow ? LINES.patience.concat(pool) : pool));
-      }, 2300);
-    }
-    if (phase === "done" || phase === "stopped") {
-      this.settleTimer = setTimeout(() => { if (!state.running) this.set("idle"); }, 5000);
+const files = {
+  map: new Map(),   // path -> { bytes: Uint8Array, mtime }
+  db: null,
+  async init() {
+    try {
+      this.db = await new Promise((resolve, reject) => {
+        const req = indexedDB.open("mini-agent", 1);
+        req.onupgradeneeded = () => req.result.createObjectStore("files", { keyPath: "path" });
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      const rows = await new Promise((resolve, reject) => {
+        const req = this.db.transaction("files").objectStore("files").getAll();
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      for (const r of rows) this.map.set(r.path, { bytes: new Uint8Array(r.bytes), mtime: r.mtime });
+    } catch (_) { this.db = null; /* private mode etc: keep files in memory for this visit */ }
+    const legacy = store.get("ma.files", null);   // text files saved by older versions
+    if (legacy && typeof legacy === "object") {
+      for (const [p, text] of Object.entries(legacy)) if (!this.map.has(p)) this.put(p, enc.encode(String(text)));
+      store.remove("ma.files");
     }
   },
+  _tx(fn) {
+    if (!this.db) return;
+    try { fn(this.db.transaction("files", "readwrite").objectStore("files")); } catch (_) { /* ignore */ }
+  },
+  put(path, bytes, mtime = Date.now()) {
+    this.map.set(path, { bytes, mtime });
+    this._tx((s) => s.put({ path, bytes: bytes.slice().buffer, mtime }));
+  },
+  remove(path) {
+    this.map.delete(path);
+    this._tx((s) => s.delete(path));
+  },
+  get(path) { return this.map.get(path); },
+  has(path) { return this.map.has(path); },
+  paths() { return [...this.map.keys()].sort(); },
+  snapshot() { return new Map([...this.map].map(([p, f]) => [p, f.mtime])); },
 };
 
+const sameBytes = (a, b) => {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+};
+
+const EXT_INFO = {
+  xlsx: ["sheet", "Excel spreadsheet", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"],
+  xls: ["sheet", "Excel spreadsheet", "application/vnd.ms-excel"],
+  csv: ["sheet", "CSV", "text/csv"],
+  tsv: ["sheet", "TSV", "text/tab-separated-values"],
+  docx: ["doc", "Word document", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"],
+  pdf: ["pdf", "PDF", "application/pdf"],
+  pptx: ["slides", "PowerPoint", "application/vnd.openxmlformats-officedocument.presentationml.presentation"],
+  png: ["image", "PNG image", "image/png"],
+  jpg: ["image", "JPEG image", "image/jpeg"],
+  jpeg: ["image", "JPEG image", "image/jpeg"],
+  gif: ["image", "GIF image", "image/gif"],
+  webp: ["image", "WebP image", "image/webp"],
+  svg: ["image", "SVG image", "image/svg+xml"],
+  md: ["text", "Markdown", "text/markdown"],
+  txt: ["text", "Text", "text/plain"],
+  html: ["code", "HTML", "text/html"],
+  htm: ["code", "HTML", "text/html"],
+  json: ["code", "JSON", "application/json"],
+  py: ["code", "Python", "text/x-python"],
+  js: ["code", "JavaScript", "text/javascript"],
+  css: ["code", "CSS", "text/css"],
+  xml: ["code", "XML", "application/xml"],
+  zip: ["archive", "ZIP archive", "application/zip"],
+};
+function fileInfo(path) {
+  const ext = (path.split(".").pop() || "").toLowerCase();
+  const [kind, label, mime] = EXT_INFO[ext] || ["file", ext ? ext.toUpperCase() + " file" : "File", "application/octet-stream"];
+  return { ext, kind, label, mime };
+}
+const isTextual = (path) => ["text", "code"].includes(fileInfo(path).kind) || ["csv", "tsv"].includes(fileInfo(path).ext);
+function humanSize(n) {
+  if (n < 1024) return `${n} bytes`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)} KB`;
+  return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+const blobUrls = new Map();
+function fileUrl(path) {
+  const f = files.get(path);
+  if (!f) return null;
+  const cached = blobUrls.get(path);
+  if (cached && cached.mtime === f.mtime) return cached.url;
+  if (cached) URL.revokeObjectURL(cached.url);
+  const url = URL.createObjectURL(new Blob([f.bytes], { type: fileInfo(path).mime }));
+  blobUrls.set(path, { url, mtime: f.mtime });
+  return url;
+}
+
 // ---------------------------------------------------------------------------
-// Talking to Groq
+// Talking to the model
 // ---------------------------------------------------------------------------
 class AgentError extends Error {
   constructor(message, code) { super(message); this.code = code; }
 }
 
 function endpoint() {
-  if (state.settings.provider === "openrouter") return PROVIDERS.openrouter.url;   // OpenRouter allows browser calls
+  if (state.settings.provider === "openrouter") return PROVIDERS.openrouter.url;
   if (state.settings.relayUrl) return state.settings.relayUrl.trim();
-  if (location.hostname.endsWith(".vercel.app")) return "/api/chat";   // deployed with the relay
-  return GROQ_URL;
+  if (location.hostname.endsWith(".vercel.app")) return "/api/chat";
+  return PROVIDERS.groq.url;
 }
 
 async function callLLM(body, signal) {
@@ -247,9 +220,8 @@ async function callLLM(body, signal) {
     if (state.settings.provider === "openrouter") {
       throw new AgentError("Couldn't reach OpenRouter. Check your internet connection and try again.", "network");
     }
-    throw new AgentError(
-      "Couldn't reach Groq from this page. Either you're offline, or Groq is blocking calls made directly from a browser. " +
-      "Fix: switch to an OpenRouter key in Settings, or set up the free relay described in the README.", "network");
+    throw new AgentError("Couldn't reach Groq. You may be offline, or Groq may be blocking calls from web pages. " +
+      "Switching to an OpenRouter key in Settings fixes the second case.", "network");
   }
   let data = null;
   try { data = await res.json(); } catch (_) { /* non-JSON */ }
@@ -283,11 +255,10 @@ const truncate = (t, n = MAX_TOOL_OUTPUT) => {
 
 function cleanPath(p) {
   const parts = String(p || "").replace(/\\/g, "/").split("/").filter((x) => x && x !== ".");
-  if (!parts.length || parts.includes("..")) throw new Error("Use a simple file name inside the workspace, like notes/report.md");
+  if (!parts.length || parts.includes("..")) throw new Error("Use a simple file name, like notes/report.md");
   return parts.join("/");
 }
 
-// Web access: Groq uses its "compound" model (search built in); OpenRouter uses its "web" plugin.
 async function askWeb(prompt, signal, domain) {
   const body = { model: provider().searchModel, messages: [{ role: "user", content: prompt }] };
   if (state.settings.provider === "openrouter") {
@@ -299,11 +270,10 @@ async function askWeb(prompt, signal, domain) {
   const msg = data.choices[0].message;
   let text = msg.content || "";
   const urls = new Set();
-  for (const t of msg.executed_tools || []) {             // Groq
-    const results = (t.search_results && t.search_results.results) || [];
-    for (const r of results) if (r.url) urls.add(r.url);
+  for (const t of msg.executed_tools || []) {
+    for (const r of (t.search_results && t.search_results.results) || []) if (r.url) urls.add(r.url);
   }
-  for (const a of msg.annotations || []) {                // OpenRouter
+  for (const a of msg.annotations || []) {
     if (a.type === "url_citation" && a.url_citation && a.url_citation.url) urls.add(a.url_citation.url);
   }
   if (urls.size) text += "\n\nSources:\n" + [...urls].slice(0, 8).map((u) => "- " + u).join("\n");
@@ -312,7 +282,7 @@ async function askWeb(prompt, signal, domain) {
 
 function calculate(expression) {
   let s = String(expression).replace(/×/g, "*").replace(/÷/g, "/").replace(/\*\*/g, "^");
-  if (!/[a-z]/i.test(s)) s = s.replace(/,/g, "");   // 1,25,000 -> 125000 (only when no functions)
+  if (!/[a-z]/i.test(s)) s = s.replace(/,/g, "");
   const compact = s.replace(/\s+/g, "");
   const tokens = compact.match(/\d*\.?\d+(?:e[+-]?\d+)?|[a-z_][a-z0-9_]*|[()+\-*/%^,]/gi) || [];
   if (tokens.join("") !== compact) throw new Error("Only numbers, + - * / % ^, brackets and maths functions are allowed.");
@@ -376,36 +346,43 @@ const python = {
     this.worker = new Worker("py-worker.js");
     this.worker.onmessage = (e) => {
       const p = this.pending.get(e.data.id);
-      if (p) { this.pending.delete(e.data.id); p.resolve(e.data); }
+      if (!p) return;
+      if (e.data.progress) { p.onProgress && p.onProgress(e.data.progress); return; }
+      this.pending.delete(e.data.id);
+      p.resolve(e.data);
     };
     this.worker.onerror = (e) => {
-      for (const p of this.pending.values()) p.resolve({ ok: false, error: e.message || "Worker crashed" });
+      for (const p of this.pending.values()) p.resolve({ ok: false, error: e.message || "Python crashed" });
       this.pending.clear();
+      this.worker = null;
     };
   },
   kill() {
     if (this.worker) this.worker.terminate();
     this.worker = null;
+    this.warmed = false;
     for (const p of this.pending.values()) p.resolve({ ok: false, error: "Stopped." });
     this.pending.clear();
   },
-  run(code, timeoutMs) {
+  run(code, timeoutMs, onProgress) {
     if (!this.worker) this.start();
     const id = ++this.seq;
+    const payload = {};
+    for (const p of files.paths()) payload[p] = files.get(p).bytes;
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         this.kill();
-        resolve({ ok: false, error: `Stopped after ${Math.round(timeoutMs / 1000)} seconds (too slow or stuck in a loop).` });
+        resolve({ ok: false, error: `Stopped after ${Math.round(timeoutMs / 1000)} seconds (too slow, or stuck in a loop).` });
       }, timeoutMs);
-      this.pending.set(id, { resolve: (r) => { clearTimeout(timer); resolve(r); } });
-      this.worker.postMessage({ id, code, files: state.files });
+      this.pending.set(id, { onProgress, resolve: (r) => { clearTimeout(timer); resolve(r); } });
+      this.worker.postMessage({ id, code, files: payload });
     });
   },
 };
 
 function approveCode(code) {
-  if (state.settings.autoRun) return Promise.resolve(true);
+  if (!state.settings.askBeforeCode) return Promise.resolve(true);
   const dlg = document.getElementById("approve");
   document.getElementById("approveCode").textContent = code;
   return new Promise((resolve) => {
@@ -415,44 +392,57 @@ function approveCode(code) {
   });
 }
 
+// Bring the worker's copy of the workspace back, and report what changed.
+function syncFromPython(returned) {
+  const changed = [];
+  for (const [path, bytes] of Object.entries(returned || {})) {
+    const cur = files.get(path);
+    if (!cur || !sameBytes(cur.bytes, bytes)) { files.put(path, bytes); changed.push(path); }
+  }
+  const removed = files.paths().filter((p) => !(p in (returned || {})));
+  for (const p of removed) files.remove(p);
+  return { changed, removed };
+}
+
 const TOOL_FUNCTIONS = {
-  async web_search({ query }, signal) {
+  async web_search({ query }, ctx) {
     if (!query) throw new Error("query is required");
-    return askWeb(`Search the web and answer concisely and factually. Include specific numbers and dates, and list the source URLs you used.\n\nQuery: ${query}`, signal);
+    return askWeb(`Search the web and answer concisely and factually. Include specific numbers and dates, and list the source URLs you used.\n\nQuery: ${query}`, ctx.signal);
   },
-  async fetch_webpage({ url }, signal) {
-    let host;
-    try { host = new URL(url).hostname; } catch (_) { host = ""; }
+  async fetch_webpage({ url }, ctx) {
+    let host = "";
+    try { host = new URL(url).hostname; } catch (_) { /* invalid */ }
     if (!/^https?:\/\//i.test(url || "") || !host) throw new Error("Give a full URL starting with http:// or https://");
-    return askWeb(`Visit this exact page and report its main content in detail: key facts, numbers, names and dates. Don't add anything that isn't on the page.\n\nURL: ${url}`, signal, host);
+    return askWeb(`Visit this exact page and report its main content in detail: key facts, numbers, names and dates. Don't add anything that isn't on the page.\n\nURL: ${url}`, ctx.signal, host);
   },
   async calculator({ expression }) { return calculate(expression); },
-  async run_python({ code }) {
+  async run_python({ code }, ctx) {
     if (!code) throw new Error("code is required");
     if (!(await approveCode(code))) return "The user declined to run this code. Ask them, or try another approach.";
-    if (!python.warmed) blob.say("Downloading an entire Python into your browser. One time only…");
-    const r = await python.run(code, python.warmed ? 60000 : 180000);
+    const r = await python.run(code, python.warmed ? 90000 : 240000, ctx.onProgress);
     if (!r.ok) return "Error: " + r.error;
     python.warmed = true;
-    const before = JSON.stringify(state.files);
-    state.files = r.files || {};
-    if (JSON.stringify(state.files) !== before) { save.files(); renderFiles(); }
-    return `exit code: ${r.exit}\nstdout:\n${r.out}\nstderr:\n${r.err}`;
+    const { changed, removed } = syncFromPython(r.files);
+    let out = `exit code: ${r.exit}\nstdout:\n${r.out}\nstderr:\n${r.err}`;
+    if (changed.length) out += `\nFiles created or updated (shown to the user automatically): ${changed.map((p) => `${p} (${humanSize(files.get(p).bytes.length)})`).join(", ")}`;
+    if (removed.length) out += `\nFiles deleted: ${removed.join(", ")}`;
+    return out;
   },
   async write_file({ path, content }) {
     const p = cleanPath(path);
-    state.files[p] = String(content ?? "");
-    save.files(); renderFiles();
-    return `Wrote ${state.files[p].length} characters to ${p}`;
+    files.put(p, enc.encode(String(content ?? "")));
+    return `Wrote ${humanSize(files.get(p).bytes.length)} to ${p}. It is shown to the user automatically.`;
   },
   async read_file({ path }) {
     const p = cleanPath(path);
-    if (!(p in state.files)) throw new Error(`No file called ${p}. Use list_files to see what exists.`);
-    return state.files[p];
+    const f = files.get(p);
+    if (!f) throw new Error(`No file called ${p}. Use list_files to see what exists.`);
+    if (!isTextual(p)) return `${p} is a ${fileInfo(p).label} (${humanSize(f.bytes.length)}). Use run_python to open and inspect it.`;
+    return dec.decode(f.bytes);
   },
   async list_files() {
-    const names = Object.keys(state.files).sort();
-    return names.length ? names.map((n) => `${n} (${state.files[n].length} chars)`).join("\n") : "(workspace is empty)";
+    const names = files.paths();
+    return names.length ? names.map((n) => `${n} (${humanSize(files.get(n).bytes.length)})`).join("\n") : "(no files yet)";
   },
   async get_current_time() {
     return new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short" }) +
@@ -470,23 +460,18 @@ const TOOLS = [
     { url: { type: "string" } }, ["url"]),
   tool("calculator", "Exact arithmetic, e.g. '125000 * 0.18' or 'round(sqrt(2), 3)'. Use instead of doing maths in your head.",
     { expression: { type: "string" } }, ["expression"]),
-  tool("run_python", "Run Python code (in the user's browser, no internet access; numpy and pandas work). The working folder holds the workspace files. Print anything you need to see. Use for data work, multi-step calculations, or testing code.",
+  tool("run_python", "Run Python 3 in the user's browser (no internet). Use it for calculations, data work, and to CREATE FILES: " +
+    "Excel (openpyxl, pandas), Word (python-docx), PDF (fpdf2), PowerPoint (python-pptx), charts (matplotlib), CSV, ZIP. " +
+    "Save files in the current folder with plain names; every new or changed file is shown to the user automatically. Print what you need to see.",
     { code: { type: "string" } }, ["code"]),
-  tool("write_file", "Create or overwrite a text file in the workspace. The user can download it from Settings.",
+  tool("write_file", "Create or overwrite a text file (Markdown, CSV, HTML, code, JSON). It is shown to the user automatically.",
     { path: { type: "string" }, content: { type: "string" } }, ["path", "content"]),
-  tool("read_file", "Read a text file from the workspace.", { path: { type: "string" } }, ["path"]),
-  tool("list_files", "List the files in the workspace."),
+  tool("read_file", "Read a text file you made earlier.", { path: { type: "string" } }, ["path"]),
+  tool("list_files", "List the files made so far."),
   tool("get_current_time", "Get the user's current local date and time."),
 ];
 
-const TOOL_LABELS = {
-  web_search: ["🔎", "Searched the web"], fetch_webpage: ["📄", "Read a web page"],
-  calculator: ["🧮", "Did some maths"], run_python: ["🐍", "Ran Python"],
-  write_file: ["✏️", "Wrote a file"], read_file: ["👓", "Read a file"],
-  list_files: ["🗂️", "Checked its files"], get_current_time: ["⏰", "Checked the time"],
-};
-
-async function executeTool(name, rawArgs, signal) {
+async function executeTool(name, rawArgs, ctx) {
   const fn = TOOL_FUNCTIONS[name];
   if (!fn) return `Error: unknown tool "${name}". Available: ${Object.keys(TOOL_FUNCTIONS).join(", ")}`;
   let args;
@@ -497,12 +482,55 @@ async function executeTool(name, rawArgs, signal) {
     return `Error: could not read tool arguments (${e.message}). Send valid JSON.`;
   }
   try {
-    return truncate(await fn(args, signal));
+    return truncate(await fn(args, ctx));
   } catch (e) {
     if (e.name === "AbortError") throw e;
-    return `Error while running ${name}: ${e.message}`;   // goes back to the model so it can adapt
+    return `Error while running ${name}: ${e.message}`;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Plain-English status for each step (what is actually happening)
+// ---------------------------------------------------------------------------
+const quote = (s, n = 60) => { s = String(s || "").trim(); return `“${s.length > n ? s.slice(0, n - 1) + "…" : s}”`; };
+const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ""); } catch (_) { return "a web page"; } };
+const FILE_RE = /['"]([\w\-./ ]+\.(?:xlsx|xls|csv|tsv|docx|pdf|pptx|png|jpe?g|svg|gif|webp|md|txt|html|json|zip))['"]/gi;
+function filesInCode(code) {
+  const found = [];
+  for (const m of String(code || "").matchAll(FILE_RE)) if (!found.includes(m[1])) found.push(m[1].split("/").pop());
+  return found;
+}
+const listNames = (names) => names.length <= 2 ? names.join(" and ") : `${names.slice(0, 2).join(", ")} and ${names.length - 2} more`;
+
+function describe(name, args, done) {
+  const a = args || {};
+  switch (name) {
+    case "web_search": return `${done ? "Searched" : "Searching"} the web for ${quote(a.query)}`;
+    case "fetch_webpage": return `${done ? "Read" : "Reading"} ${hostOf(a.url)}`;
+    case "calculator": return `${done ? "Calculated" : "Calculating"} ${String(a.expression || "").slice(0, 60)}`;
+    case "run_python": {
+      const names = filesInCode(a.code);
+      if (names.length) return `${done ? "Created" : "Creating"} ${listNames(names)}`;
+      return done ? "Ran Python" : "Running Python";
+    }
+    case "write_file": return `${done ? "Wrote" : "Writing"} ${a.path || "a file"}`;
+    case "read_file": return `${done ? "Read" : "Reading"} ${a.path || "a file"}`;
+    case "list_files": return done ? "Checked the files" : "Checking the files";
+    case "get_current_time": return done ? "Checked the date" : "Checking the date";
+    default: return `${done ? "Used" : "Using"} ${name}`;
+  }
+}
+const parseArgs = (raw) => { try { return JSON.parse(raw || "{}"); } catch (_) { return {}; } };
+function stepDetail(name, args, result) {
+  if (name === "run_python") return `${args.code || ""}\n\n— Output —\n${result}`;
+  if (name === "calculator") return `${args.expression} = ${result}`;
+  if (name === "write_file") return result;
+  return result;
+}
+const fmtDuration = (ms) => {
+  const s = Math.max(1, Math.round(ms / 1000));
+  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${String(s % 60).padStart(2, "0")}s`;
+};
 
 // ---------------------------------------------------------------------------
 // System prompt + context management
@@ -516,9 +544,17 @@ Current date and time: ${now} (${Intl.DateTimeFormat().resolvedOptions().timeZon
 How to work:
 - For anything about the present (prices, news, rates, who holds a role, latest versions), use web_search first. Do not rely on memory.
 - For any number that matters, use calculator or run_python. Never do important maths in your head.
-- When you write code or a file, verify it: run it, or read it back, before saying it is done.
 - If a tool returns an error, read it, fix your approach, and try again. Don't repeat the exact same failing call.
 - Ask the user a question only when you truly cannot proceed without their input.
+
+Making files (the user can preview, download and share them):
+- You can make real files: Excel (.xlsx), Word (.docx), PDF, PowerPoint (.pptx), charts and images (.png), CSV, Markdown, HTML, JSON, code and ZIP.
+- Build binary files with run_python and save them in the current folder with short, descriptive names (e.g. "gst_summary.xlsx"). Text files can also use write_file.
+- Libraries: openpyxl or pandas for Excel (use real formulas, bold headers, sensible column widths, number formats); python-docx for Word; python-pptx for PowerPoint; fpdf2 for PDF; matplotlib for charts (plt.savefig("name.png", dpi=200, bbox_inches="tight")). They install automatically the first time.
+- For fpdf2 PDFs, use the provided Unicode font so symbols like ₹ work: pdf.add_font("DejaVu", "", FONT_REGULAR); pdf.add_font("DejaVu", "B", FONT_BOLD); pdf.set_font("DejaVu", size=11).
+- Python has no internet access. Get any data you need with web_search first, then put it in the code.
+- After making a file, check it (reopen it in Python and print a short summary) before finishing.
+- Files appear to the user automatically, so don't paste their contents into your answer. Name each file and say in a line what's in it.
 
 When finished, give a clear, concise final answer in Markdown. Briefly say what you checked, and list source URLs if you used the web.`;
 }
@@ -528,7 +564,7 @@ function trimHistory() {
   while (size() > MAX_HISTORY_CHARS) {
     const userIdx = state.history.map((m, i) => (m.role === "user" ? i : -1)).filter((i) => i >= 0);
     if (userIdx.length < 2) break;
-    state.history.splice(userIdx[0], userIdx[1] - userIdx[0]);   // drop the oldest whole turn
+    state.history.splice(userIdx[0], userIdx[1] - userIdx[0]);
   }
 }
 
@@ -538,13 +574,14 @@ function trimHistory() {
 async function runTurn(text) {
   trimHistory();
   state.history.push({ role: "user", content: text });
-  const entry = { kind: "user", text };
-  state.log.push(entry);
-  renderEntry(entry);
+  const userEntry = { kind: "user", text };
+  state.log.push(userEntry);
+  renderEntry(userEntry);
 
-  const turn = { kind: "agent", text: "", steps: [] };
-  const view = renderLiveTrace(turn);
-  const addStep = (step) => { turn.steps.push(step); view.update(); };
+  const turn = { kind: "agent", text: "", steps: [], files: [], ms: 0 };
+  const view = liveTurn(turn);
+  const started = Date.now();
+  const before = files.snapshot();
 
   state.running = true;
   state.abort = new AbortController();
@@ -552,10 +589,18 @@ async function runTurn(text) {
   setRunningUI(true);
   let badCalls = 0;
 
+  const finish = (patch) => {
+    Object.assign(turn, patch);
+    turn.ms = Date.now() - started;
+    turn.files = files.paths().filter((p) => before.get(p) !== files.get(p).mtime);
+    view.finish();
+  };
+
   try {
     for (let step = 1; step <= MAX_STEPS; step++) {
       // THINK
-      blob.set("thinking");
+      const thinkStart = Date.now();
+      view.status("Thinking");
       let data;
       try {
         data = await callLLM({
@@ -566,8 +611,7 @@ async function runTurn(text) {
       } catch (e) {
         if (e.code === "tool_use_failed" && badCalls < 2) {
           badCalls++;
-          blob.set("acting", "harness");
-          addStep({ type: "note", glyph: "🛟", title: "Fumbled a tool call, retried", detail: e.message });
+          view.addStep({ icon: "retry", label: "Retried a tool call that came out garbled", detail: e.message });
           state.history.push({ role: "user", content: "[harness note] Your last tool call was malformed and was not run. Retry with valid JSON arguments that match the tool's schema." });
           continue;
         }
@@ -575,11 +619,13 @@ async function runTurn(text) {
       }
 
       const msg = data.choices[0].message;
-      if (msg.reasoning) addStep({ type: "think", glyph: "💭", title: "Thought about it", detail: msg.reasoning });
+      if (msg.reasoning) {
+        view.addStep({ icon: "think", label: `Thought for ${fmtDuration(Date.now() - thinkStart)}`, detail: msg.reasoning });
+      }
 
       // ACT + OBSERVE
       if (msg.tool_calls && msg.tool_calls.length) {
-        if (msg.content) addStep({ type: "note", glyph: "🗒️", title: "Left itself a note", detail: msg.content });
+        if (msg.content) view.addStep({ icon: "note", label: "Planned the next step", detail: msg.content });
         state.history.push({
           role: "assistant",
           content: msg.content || null,
@@ -589,41 +635,33 @@ async function runTurn(text) {
         });
         for (const tc of msg.tool_calls) {
           const name = tc.function.name;
-          const [glyph, label] = TOOL_LABELS[name] || ["🛠️", "Used " + name];
-          blob.set("acting", name);
-          addStep({ type: "act", glyph, title: label, detail: prettyArgs(tc.function.arguments) });
-          const result = await executeTool(name, tc.function.arguments, signal);
-          blob.set("observing");
-          addStep({ type: "observe", glyph: "👀", title: "Looked at the result", detail: result });
+          const args = parseArgs(tc.function.arguments);
+          view.status(describe(name, args, false));
+          const result = await executeTool(name, tc.function.arguments, {
+            signal,
+            onProgress: (p) => view.status(p === "Running Python" ? describe(name, args, false) : p),
+          });
+          const failed = /^Error/.test(result) || /exit code: 1/.test(result);
+          view.addStep({ icon: name, label: describe(name, args, true) + (failed ? " (hit an error)" : ""), detail: stepDetail(name, args, result) });
           state.history.push({ role: "tool", tool_call_id: tc.id, content: result });
-          await pause(450);   // let the observing face land
         }
         continue;
       }
 
       // CHECK -> DONE
-      turn.text = msg.content || "(It finished without saying anything. Try rephrasing.)";
+      finish({ text: msg.content || "(It finished without saying anything. Try rephrasing.)" });
       state.history.push({ role: "assistant", content: turn.text });
-      view.finish();
-      blob.set("done");
       return;
     }
-    turn.text = `I stopped after ${MAX_STEPS} steps without finishing. Say "continue" to let me keep going.`;
+    finish({ text: `I stopped after ${MAX_STEPS} steps without finishing. Say "continue" to let me keep going.` });
     state.history.push({ role: "assistant", content: turn.text });
-    view.finish();
-    blob.set("stopped");
   } catch (e) {
     if (e.name === "AbortError") {
-      turn.text = "Stopped.";
+      finish({ text: "", stopped: true });
       state.history.push({ role: "assistant", content: "(The user stopped this request.)" });
-      view.finish();
-      blob.set("stopped");
     } else {
-      turn.kind = "error";
-      turn.text = e.message;
+      finish({ kind: "error", text: e.message, retry: text });
       if (state.history.length && state.history[state.history.length - 1].role === "user") state.history.pop();
-      view.finish();
-      blob.set("error");
     }
   } finally {
     state.running = false;
@@ -633,27 +671,48 @@ async function runTurn(text) {
   }
 }
 
-const pause = (ms) => new Promise((r) => setTimeout(r, ms));
-function prettyArgs(raw) {
-  try {
-    const obj = JSON.parse(raw || "{}");
-    if (obj.code) return obj.code;
-    return Object.entries(obj).map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`).join("\n") || "(no arguments)";
-  } catch (_) { return String(raw); }
-}
-
 // ---------------------------------------------------------------------------
-// Rendering
+// Rendering helpers
 // ---------------------------------------------------------------------------
 function el(tag, attrs = {}, ...kids) {
   const node = document.createElement(tag);
   for (const [k, v] of Object.entries(attrs)) {
+    if (v === false || v == null) continue;
     if (k === "class") node.className = v;
     else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
-    else node.setAttribute(k, v);
+    else node.setAttribute(k, v === true ? "" : v);
   }
-  for (const kid of kids) if (kid != null) node.append(kid);
+  for (const kid of kids) if (kid != null && kid !== false) node.append(kid);
   return node;
+}
+const svgNS = "http://www.w3.org/2000/svg";
+const ICONS = {
+  think: "M12 3a6 6 0 0 0-3.6 10.8c.4.3.6.8.6 1.3V17h6v-1.9c0-.5.2-1 .6-1.3A6 6 0 0 0 12 3ZM9.5 20h5",
+  note: "M5 4h10l4 4v12H5zM15 4v4h4M8 12h8M8 16h5",
+  retry: "M4 12a8 8 0 0 1 14-5.3M20 12a8 8 0 0 1-14 5.3M18 3v4h-4M6 21v-4h4",
+  web_search: "M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM20 20l-4-4",
+  fetch_webpage: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM3 12h18M12 3c2.5 2.7 2.5 15.3 0 18M12 3c-2.5 2.7-2.5 15.3 0 18",
+  calculator: "M6 3h12v18H6zM9 7h6M9 11h.01M12 11h.01M15 11h.01M9 14h.01M12 14h.01M15 14h.01M9 17h.01M12 17h.01M15 17h.01",
+  run_python: "M8 8l-4 4 4 4M16 8l4 4-4 4M13 6l-2 12",
+  write_file: "M4 20h4L19 9l-4-4L4 16zM14 6l4 4",
+  read_file: "M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6",
+  list_files: "M3 6h7l2 2h9v11H3z",
+  get_current_time: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM12 7v5l3 2",
+  chevron: "M9 6l6 6-6 6",
+  alert: "M12 4 2.5 20h19ZM12 10v4M12 17h.01",
+  share: "M12 3v12M8 7l4-4 4 4M5 12v8h14v-8",
+  download: "M12 4v12M7 11l5 5 5-5M5 20h14",
+  file: "M6 3h8l4 4v14H6zM14 3v4h4",
+};
+function icon(name, cls = "ico") {
+  const s = document.createElementNS(svgNS, "svg");
+  s.setAttribute("viewBox", "0 0 24 24");
+  s.setAttribute("class", cls);
+  s.setAttribute("aria-hidden", "true");
+  const p = document.createElementNS(svgNS, "path");
+  p.setAttribute("d", ICONS[name] || ICONS.note);
+  s.append(p);
+  return s;
 }
 
 if (window.DOMPurify) {
@@ -661,161 +720,368 @@ if (window.DOMPurify) {
     if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener"); }
   });
 }
-
 function markdown(text) {
-  const div = el("div");
-  if (window.marked && window.DOMPurify) {
-    div.innerHTML = DOMPurify.sanitize(marked.parse(text));
-  } else {
-    div.style.whiteSpace = "pre-wrap";
-    div.textContent = text;
+  const div = el("div", { class: "md" });
+  if (window.marked && window.DOMPurify) div.innerHTML = DOMPurify.sanitize(marked.parse(text));
+  else { div.style.whiteSpace = "pre-wrap"; div.textContent = text; }
+  // links and images that point at the agent's own files open the preview instead of a dead URL
+  for (const a of div.querySelectorAll("a[href]")) {
+    const p = decodeURIComponent(a.getAttribute("href")).replace(/^\.?\//, "").replace(/^sandbox:\/?(mnt\/data\/)?/, "");
+    if (files.has(p)) { a.removeAttribute("target"); a.addEventListener("click", (e) => { e.preventDefault(); openPreview(p); }); }
+  }
+  for (const img of div.querySelectorAll("img[src]")) {
+    const p = decodeURIComponent(img.getAttribute("src")).replace(/^\.?\//, "");
+    if (files.has(p)) img.src = fileUrl(p);
   }
   return div;
 }
 
-function scrollDown() { ui.chat.scrollTop = ui.chat.scrollHeight; }
+const ui = {
+  chat: document.getElementById("chat"),
+  thread: document.getElementById("thread"),
+  form: document.getElementById("composer"),
+  input: document.getElementById("input"),
+  send: document.getElementById("sendBtn"),
+  subtitle: document.getElementById("subtitle"),
+};
+const nearBottom = () => ui.chat.scrollHeight - ui.chat.scrollTop - ui.chat.clientHeight < 160;
+const scrollDown = (force) => { if (force || nearBottom()) ui.chat.scrollTop = ui.chat.scrollHeight; };
 
-function traceNode(steps, live) {
-  const details = el("details", { class: "trace" });
-  const summary = el("summary");
-  const list = el("ol", { class: "steps" });
-  details.append(summary, list);
-  const fill = (isLive) => {
-    const last = steps[steps.length - 1];
-    summary.textContent = isLive
-      ? (last ? `Working: ${last.title.toLowerCase()}` : "Working…")
-      : `See how it got there (${steps.length} step${steps.length === 1 ? "" : "s"})`;
-    list.replaceChildren(...steps.map((s) =>
-      el("li", { class: "step" },
-        el("details", {},
-          el("summary", {}, el("span", { class: "glyph", "aria-hidden": "true" }, s.glyph), s.title),
-          el("pre", {}, truncate(s.detail || "", 4000))))));
+// ---------------------------------------------------------------------------
+// The loader: your GIF, spinning faster as more of the task gets done
+// ---------------------------------------------------------------------------
+const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+function makeLoader() {
+  const img = el("img", { class: "loader", src: reduceMotion ? "assets/loader-still.png" : "assets/loader.webp", alt: "" });
+  let anim = null;
+  if (!reduceMotion && img.animate) {
+    anim = img.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }], { duration: 2400, iterations: Infinity });
+  }
+  return {
+    node: img,
+    progress(stepsDone) {   // 1x at the start, up to 4x as steps pile up
+      if (!anim) return;
+      const rate = Math.min(4, 1 + stepsDone * 0.45);
+      if (anim.updatePlaybackRate) anim.updatePlaybackRate(rate); else anim.playbackRate = rate;
+    },
+    stop() { if (anim) anim.cancel(); },
   };
-  fill(live);
-  return { node: details, fill };
+}
+
+// ---------------------------------------------------------------------------
+// Rendering the conversation
+// ---------------------------------------------------------------------------
+function stepsList(steps) {
+  return el("ol", { class: "steps" }, ...steps.map((s) => {
+    const label = s.label || s.title || "Step";   // `title` = older saved chats
+    const row = el("li", { class: "step" });
+    const head = el("span", { class: "step-label" }, icon(s.icon || "note", "ico step-ico"), el("span", {}, label));
+    if (s.detail) {
+      row.append(el("details", {}, el("summary", {}, head), el("pre", { class: "step-detail" }, truncate(s.detail, 5000))));
+    } else row.append(head);
+    return row;
+  }));
+}
+
+function activityNode(turn) {
+  if (!turn.steps || !turn.steps.length) return null;
+  const onlyThought = turn.steps.length === 1 && (turn.steps[0].icon === "think");
+  const label = onlyThought ? turn.steps[0].label
+    : turn.ms ? `Worked for ${fmtDuration(turn.ms)}` : `${turn.steps.length} step${turn.steps.length === 1 ? "" : "s"}`;   // older chats have no timing
+  return el("details", { class: "activity" },
+    el("summary", {}, el("span", { class: "activity-label" }, label), icon("chevron", "ico chev")),
+    stepsList(turn.steps));
+}
+
+function fileCard(path) {
+  const f = files.get(path);
+  const info = fileInfo(path);
+  const name = path.split("/").pop();
+  if (!f) {
+    return el("div", { class: "file-card gone" }, el("span", { class: `file-badge k-${info.kind}` }, info.ext.toUpperCase().slice(0, 4) || "FILE"),
+      el("span", { class: "file-meta" }, el("span", { class: "file-name" }, name), el("span", { class: "file-sub" }, "Deleted")));
+  }
+  const meta = el("span", { class: "file-meta" }, el("span", { class: "file-name" }, name),
+    el("span", { class: "file-sub" }, `${info.label}, ${humanSize(f.bytes.length)}`));
+  const badge = el("span", { class: `file-badge k-${info.kind}`, "aria-hidden": "true" }, info.ext.toUpperCase().slice(0, 4) || "FILE");
+  return el("button", { class: "file-card", type: "button", onclick: () => openPreview(path), "aria-label": `Open ${name}` },
+    badge, meta, icon("chevron", "ico chev"));
+}
+
+function filesNode(paths) {
+  if (!paths || !paths.length) return null;
+  const wrap = el("div", { class: "files" });
+  for (const p of paths) {
+    if (fileInfo(p).kind === "image" && files.has(p)) {
+      wrap.append(el("button", { class: "image-card", type: "button", onclick: () => openPreview(p), "aria-label": `Open ${p}` },
+        el("img", { src: fileUrl(p), alt: p.split("/").pop(), loading: "lazy" })));
+    }
+  }
+  const cards = paths.filter((p) => !(fileInfo(p).kind === "image" && files.has(p)));   // images are already shown big
+  if (cards.length) wrap.append(el("div", { class: "file-list" }, ...cards.map(fileCard)));
+  return wrap;
 }
 
 function renderEntry(entry) {
-  document.querySelector(".welcome")?.remove();
+  document.querySelector(".empty")?.remove();
   if (entry.kind === "user") {
-    ui.chat.append(el("div", { class: "msg user" }, entry.text));
-  } else {
-    if (entry.steps && entry.steps.length) ui.chat.append(traceNode(entry.steps, false).node);
-    if (entry.kind === "error") {
-      ui.chat.append(el("div", { class: "msg error", role: "alert" }, el("strong", {}, "That didn't work. "), entry.text));
-    } else {
-      const bubble = el("div", { class: "msg agent" });
-      bubble.append(...markdown(entry.text).childNodes);
-      ui.chat.append(bubble);
-    }
+    ui.thread.append(el("div", { class: "row user" }, el("div", { class: "bubble" }, entry.text)));
+    scrollDown(true);
+    return;
   }
+  const turn = el("div", { class: "row agent" });
+  const act = activityNode(entry);
+  if (act) turn.append(act);
+  if (entry.kind === "error") {
+    turn.append(el("div", { class: "error", role: "alert" }, icon("alert", "ico err-ico"),
+      el("div", {}, el("p", {}, entry.text),
+        entry.retry ? el("button", { class: "text-btn", type: "button", onclick: () => submit(entry.retry) }, "Try again") : null)));
+  } else if (entry.stopped) {
+    turn.append(el("p", { class: "muted" }, "Stopped."));
+  } else if (entry.text) {
+    turn.append(markdown(entry.text));
+  }
+  const fl = filesNode(entry.files);
+  if (fl) turn.append(fl);
+  ui.thread.append(turn);
   scrollDown();
 }
 
-function renderLiveTrace(turn) {
-  const t = traceNode(turn.steps, true);
-  ui.chat.append(t.node);
-  scrollDown();
+function liveTurn(turn) {
+  const loader = makeLoader();
+  const text = el("span", { class: "status-text" }, "Thinking");
+  const summary = el("summary", {}, loader.node, text, icon("chevron", "ico chev"));
+  const list = el("div");
+  const live = el("details", { class: "activity live" }, summary, list);
+  const row = el("div", { class: "row agent" }, live);
+  ui.thread.append(row);
+  scrollDown(true);
   return {
-    update() { t.fill(true); scrollDown(); },
+    status(t) { text.textContent = t; scrollDown(); },
+    addStep(step) {
+      turn.steps.push(step);
+      list.replaceChildren(stepsList(turn.steps));
+      loader.progress(turn.steps.length);
+      scrollDown();
+    },
     finish() {
-      t.node.remove();
+      loader.stop();
+      row.remove();
       state.log.push(turn);
       renderEntry(turn);
+      scrollDown(true);
     },
   };
 }
 
-function renderAll() {
-  ui.chat.replaceChildren();
-  if (!state.log.length) renderWelcome();
-  for (const entry of state.log) renderEntry(entry);
-}
-
 const EXAMPLES = [
-  "What's India's current repo rate, and what's 18% GST on ₹2,40,000?",
-  "Write Python that makes a 12 times table, run it, and save it as table.txt",
-  "Find three weird facts about octopuses and double-check each one",
+  ["Make an Excel GST calculator", "Make an Excel sheet that calculates 18% GST for 10 sample invoices, with totals and proper formatting"],
+  ["Chart India's GDP growth", "Look up India's GDP growth for the last 5 years and make a bar chart"],
+  ["Write a quotation as PDF", "Write a one-page quotation PDF for 20 hospital beds at ₹45,000 each plus 18% GST"],
+  ["Today's repo rate", "What's India's current repo rate, and what changed at the last RBI meeting?"],
 ];
 
-function renderWelcome() {
-  const card = el("section", { class: "welcome" });
+function renderEmpty() {
+  const wrap = el("section", { class: "empty" });
+  wrap.append(el("img", { class: "empty-mark", src: "assets/loader-still.png", alt: "" }));
   if (!apiKey()) {
-    const input = el("input", { type: "password", placeholder: "gsk_... or sk-or-...", "aria-label": "Groq or OpenRouter API key", spellcheck: "false", autocapitalize: "off" });
+    const input = el("input", { type: "password", placeholder: "gsk_... or sk-or-...", "aria-label": "Groq or OpenRouter API key", spellcheck: "false", autocapitalize: "off", autocomplete: "off" });
     const error = el("p", { class: "field-error", role: "alert" });
     const saveKey = () => {
       const v = input.value.trim();
       if (!v) { error.textContent = "Paste a key first."; input.focus(); return; }
       const p = detectProvider(v);
-      if (!p) {
-        error.textContent = "That doesn't look like a Groq key (gsk_...) or an OpenRouter key (sk-or-...). For anything else, use Settings.";
-        input.focus();
-        return;
-      }
+      if (!p) { error.textContent = "That doesn't look like a Groq key (gsk_...) or an OpenRouter key (sk-or-...). For other keys, use Settings."; input.focus(); return; }
       state.settings.provider = p;
       state.settings.keys[p] = v;
-      save.settings(); renderAll(); ui.input.focus();
-      blob.say(`${PROVIDERS[p].name} key accepted. Brain online.`);
+      save.settings(); updateSubtitle(); renderAll(); ui.input.focus();
     };
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveKey(); } });
     input.addEventListener("input", () => { error.textContent = ""; });
-    const link = (p, text) => el("a", { href: PROVIDERS[p].keyLink, target: "_blank", rel: "noopener" }, text);
-    card.append(
-      el("h2", {}, "Feed me an API key"),
-      el("p", {}, "I'm a blob with tools: web search, a calculator, Python and a notepad. Give me a Groq or OpenRouter key and I'll figure out which it is."),
-      el("div", { class: "key-row" }, input, el("button", { class: "primary", type: "button", onclick: saveKey }, "Save key")),
+    const link = (p, t) => el("a", { href: PROVIDERS[p].keyLink, target: "_blank", rel: "noopener" }, t);
+    wrap.append(
+      el("h2", {}, "Add an API key"),
+      el("p", { class: "lede" }, "Paste a Groq or OpenRouter key. It's saved only on this device."),
+      el("div", { class: "key-card" }, input, el("button", { class: "btn-primary", type: "button", onclick: saveKey }, "Continue")),
       error,
-      el("small", {}, "Your key stays in this browser. Get one from ", link("groq", "Groq"), " (free tier) or ", link("openrouter", "OpenRouter"), "."));
+      el("p", { class: "footnote" }, "Get a key from ", link("groq", "Groq"), " (free tier) or ", link("openrouter", "OpenRouter"), "."));
   } else {
-    card.append(
-      el("h2", {}, "Give me a job"),
-      el("p", {}, "Watch my face while I work. Tap a step later to see exactly what I did."),
-      el("div", { class: "chips" }, ...EXAMPLES.map((ex) =>
-        el("button", { class: "chip", type: "button", onclick: () => submit(ex) }, ex))));
+    wrap.append(
+      el("h2", {}, "What can I help with?"),
+      el("div", { class: "suggestions" }, ...EXAMPLES.map(([title, prompt]) =>
+        el("button", { class: "suggestion", type: "button", onclick: () => submit(prompt) }, title))));
   }
-  ui.chat.append(card);
+  ui.thread.append(wrap);
 }
 
-function renderFiles() {
-  const list = document.getElementById("fileList");
-  const names = Object.keys(state.files).sort();
-  if (!names.length) { list.replaceChildren(el("li", { class: "empty" }, "Nothing yet. Ask the agent to save something.")); return; }
-  list.replaceChildren(...names.map((name) => el("li", {},
-    el("span", { class: "name" }, name),
-    el("button", { class: "ghost", type: "button", onclick: () => download(name) }, "Download"),
-    el("button", { class: "ghost danger", type: "button", "aria-label": `Delete ${name}`, onclick: () => {
-      delete state.files[name]; save.files(); renderFiles();
-    } }, "Delete"))));
-}
-
-function download(name) {
-  const url = URL.createObjectURL(new Blob([state.files[name]], { type: "text/plain" }));
-  const a = el("a", { href: url, download: name.split("/").pop() });
-  document.body.append(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function toastError(text) {
-  ui.chat.append(el("div", { class: "msg error", role: "alert" }, el("strong", {}, "Heads up. "), text));
-  scrollDown();
+function renderAll() {
+  ui.thread.replaceChildren();
+  if (!state.log.length) renderEmpty();
+  for (const entry of state.log) renderEntry(entry);
+  scrollDown(true);
 }
 
 function setRunningUI(running) {
-  ui.send.textContent = running ? "Stop" : "Send";
   ui.send.classList.toggle("stop", running);
+  ui.send.setAttribute("aria-label", running ? "Stop" : "Send");
+  updateSendState();
+}
+function updateSendState() {
+  ui.send.disabled = !state.running && !ui.input.value.trim();
+}
+function updateSubtitle() {
+  ui.subtitle.textContent = apiKey() ? `${provider().name}, ${currentModel().split("/").pop()}` : "No key yet";
 }
 
 // ---------------------------------------------------------------------------
-// Wiring
+// File preview sheet
+// ---------------------------------------------------------------------------
+const libs = {};
+function loadScript(src) {
+  if (!libs[src]) {
+    libs[src] = new Promise((resolve, reject) => {
+      const s = el("script", { src, crossorigin: "anonymous" });
+      s.onload = resolve; s.onerror = () => { delete libs[src]; reject(new Error("Couldn't load the previewer.")); };
+      document.head.append(s);
+    });
+  }
+  return libs[src];
+}
+const XLSX_URL = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+const MAMMOTH_URL = "https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.13.0/mammoth.browser.min.js";
+
+function parseCSV(text, sep) {
+  const rows = []; let row = []; let cell = ""; let q = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (q) {
+      if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; } else if (c === '"') q = false; else cell += c;
+    } else if (c === '"') q = true;
+    else if (c === sep) { row.push(cell); cell = ""; }
+    else if (c === "\n" || c === "\r") {
+      if (c === "\r" && text[i + 1] === "\n") i++;
+      row.push(cell); rows.push(row); row = []; cell = "";
+      if (rows.length > 300) break;
+    } else cell += c;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows;
+}
+function tableFrom(rows) {
+  const [head, ...body] = rows;
+  return el("div", { class: "table-wrap" }, el("table", {},
+    el("thead", {}, el("tr", {}, ...(head || []).map((h) => el("th", {}, h)))),
+    el("tbody", {}, ...body.map((r) => el("tr", {}, ...r.map((c) => el("td", {}, c)))))));
+}
+function unavailable(msg) {
+  return el("div", { class: "preview-none" }, icon("file", "ico big-ico"), el("p", {}, msg));
+}
+
+async function buildPreview(path, body) {
+  const f = files.get(path);
+  const info = fileInfo(path);
+  const url = fileUrl(path);
+  try {
+    if (info.kind === "image") { body.replaceChildren(el("img", { class: "preview-img", src: url, alt: path })); return; }
+    if (info.ext === "pdf") {
+      body.replaceChildren(el("iframe", { class: "preview-frame", src: url, title: path }),
+        el("a", { class: "text-btn center", href: url, target: "_blank", rel: "noopener" }, "Open in a new tab"));
+      return;
+    }
+    if (info.ext === "csv" || info.ext === "tsv") { body.replaceChildren(tableFrom(parseCSV(dec.decode(f.bytes), info.ext === "tsv" ? "\t" : ","))); return; }
+    if (info.ext === "md") { body.replaceChildren(markdown(dec.decode(f.bytes))); return; }
+    if (info.ext === "html" || info.ext === "htm") {
+      body.replaceChildren(el("iframe", { class: "preview-frame", sandbox: "allow-scripts", srcdoc: dec.decode(f.bytes), title: path }));
+      return;
+    }
+    if (isTextual(path)) { body.replaceChildren(el("pre", { class: "preview-code" }, truncate(dec.decode(f.bytes), 200000))); return; }
+    if (info.ext === "xlsx" || info.ext === "xls") {
+      body.replaceChildren(el("p", { class: "muted center" }, "Opening spreadsheet…"));
+      await loadScript(XLSX_URL);
+      const wb = XLSX.read(f.bytes, { type: "array" });
+      const show = (name) => {
+        const html = XLSX.utils.sheet_to_html(wb.Sheets[name], { editable: false });
+        const holder = el("div", { class: "table-wrap xls" });
+        holder.innerHTML = DOMPurify.sanitize(html);
+        return holder;
+      };
+      const tabs = wb.SheetNames.length > 1
+        ? el("div", { class: "segmented small", role: "tablist" }, ...wb.SheetNames.map((n, i) =>
+          el("button", { type: "button", role: "tab", "aria-selected": i === 0 ? "true" : "false", onclick: (e) => {
+            for (const b of e.currentTarget.parentNode.children) b.setAttribute("aria-selected", "false");
+            e.currentTarget.setAttribute("aria-selected", "true");
+            body.lastChild.replaceWith(show(n));
+          } }, n)))
+        : null;
+      body.replaceChildren(...[tabs, show(wb.SheetNames[0])].filter(Boolean));
+      return;
+    }
+    if (info.ext === "docx") {
+      body.replaceChildren(el("p", { class: "muted center" }, "Opening document…"));
+      await loadScript(MAMMOTH_URL);
+      const res = await mammoth.convertToHtml({ arrayBuffer: f.bytes.slice().buffer });
+      const page = el("div", { class: "paper md" });
+      page.innerHTML = DOMPurify.sanitize(res.value);
+      body.replaceChildren(page);
+      return;
+    }
+    if (info.ext === "pptx") { body.replaceChildren(unavailable("PowerPoint files can't be previewed here. Share or download it to open in Keynote or PowerPoint.")); return; }
+    body.replaceChildren(unavailable(`${info.label} files can't be previewed here. Share or download it to open it.`));
+  } catch (e) {
+    body.replaceChildren(unavailable(`Couldn't show a preview (${e.message}). You can still share or download it.`));
+  }
+}
+
+const previewDlg = document.getElementById("preview");
+let previewPath = null;
+function openPreview(path) {
+  if (!files.has(path)) return;
+  previewPath = path;
+  const f = files.get(path);
+  document.getElementById("previewTitle").textContent = path.split("/").pop();
+  document.getElementById("previewSub").textContent = `${fileInfo(path).label}, ${humanSize(f.bytes.length)}`;
+  const body = document.getElementById("previewBody");
+  body.replaceChildren();
+  document.getElementById("shareBtn").hidden = !canShareFile(path);
+  previewDlg.showModal();
+  buildPreview(path, body);
+}
+function fileObject(path) {
+  const f = files.get(path);
+  return new File([f.bytes], path.split("/").pop(), { type: fileInfo(path).mime });
+}
+function canShareFile(path) {
+  try { return !!(navigator.canShare && navigator.canShare({ files: [fileObject(path)] })); } catch (_) { return false; }
+}
+function downloadFile(path) {
+  const a = el("a", { href: fileUrl(path), download: path.split("/").pop() });
+  document.body.append(a); a.click(); a.remove();
+}
+document.getElementById("shareBtn").addEventListener("click", async () => {
+  try { await navigator.share({ files: [fileObject(previewPath)], title: previewPath }); }
+  catch (e) { if (e.name !== "AbortError") downloadFile(previewPath); }
+});
+document.getElementById("downloadBtn").addEventListener("click", () => downloadFile(previewPath));
+document.getElementById("deleteBtn").addEventListener("click", () => {
+  files.remove(previewPath);
+  previewDlg.close();
+  renderAll();
+  renderSettingsFiles();
+});
+document.getElementById("previewDone").addEventListener("click", () => previewDlg.close());
+previewDlg.addEventListener("click", (e) => { if (e.target === previewDlg) previewDlg.close(); });
+
+// ---------------------------------------------------------------------------
+// Composer
 // ---------------------------------------------------------------------------
 function submit(text) {
   text = (text || "").trim();
   if (!text || state.running) return;
   if (!apiKey()) {
-    if (state.log.length) { document.getElementById("settingsBtn").click(); return; }
-    renderAll(); document.querySelector(".welcome input")?.focus(); return;
+    if (state.log.length) { openSettings(); return; }
+    renderAll(); document.querySelector(".empty input")?.focus(); return;
   }
-  ui.input.value = ""; autosize();
+  ui.input.value = ""; autosize(); updateSendState();
   runTurn(text);
 }
 
@@ -824,51 +1090,73 @@ ui.form.addEventListener("submit", (e) => {
   if (state.running) { state.abort?.abort(); python.kill(); return; }
   submit(ui.input.value);
 });
-
 const coarse = matchMedia("(pointer: coarse)").matches;
 ui.input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !coarse && !e.isComposing) { e.preventDefault(); ui.form.requestSubmit(); }
 });
-function autosize() { ui.input.style.height = "auto"; ui.input.style.height = Math.min(ui.input.scrollHeight, 160) + "px"; }
-ui.input.addEventListener("input", autosize);
+function autosize() { ui.input.style.height = "auto"; ui.input.style.height = Math.min(ui.input.scrollHeight, 168) + "px"; }
+ui.input.addEventListener("input", () => { autosize(); updateSendState(); });
 
 document.getElementById("newChatBtn").addEventListener("click", () => {
   if (state.running) return;
-  state.history = []; state.log = []; save.chat(); renderAll(); blob.set("idle");
+  state.history = []; state.log = []; save.chat(); renderAll();
 });
 
-// settings sheet
+// ---------------------------------------------------------------------------
+// Settings sheet (edits a draft; Done applies it)
+// ---------------------------------------------------------------------------
 const settingsDlg = document.getElementById("settings");
 const f = {
-  key: document.getElementById("keyInput"), model: document.getElementById("modelInput"),
-  autoRun: document.getElementById("autoRunInput"), relay: document.getElementById("relayInput"),
-  radios: [...document.querySelectorAll('input[name="provider"]')],
+  key: document.getElementById("keyInput"),
+  custom: document.getElementById("customModel"),
+  ask: document.getElementById("askInput"),
+  relay: document.getElementById("relayInput"),
+  seg: document.getElementById("providerSeg"),
+  models: document.getElementById("modelList"),
 };
-// The sheet edits a draft, so switching providers back and forth never loses what you typed.
 let draft = null;
-const checkedProvider = () => (f.radios.find((r) => r.checked) || {}).value || "groq";
 
 function stashFields() {
   draft.keys[draft.provider] = f.key.value.trim();
-  draft.models[draft.provider] = f.model.value.trim();
+}
+function renderModels() {
+  const P = PROVIDERS[draft.provider];
+  const current = draft.models[draft.provider] || P.defaultModel;
+  const known = P.models.some(([id]) => id === current);
+  const choose = (id) => { draft.models[draft.provider] = id; renderModels(); };
+  f.models.replaceChildren(
+    ...P.models.map(([id, label]) => el("button", { class: "cell cell-choice", type: "button", role: "radio",
+      "aria-checked": String(id === current), onclick: () => choose(id) },
+      el("span", { class: "cell-text" }, el("span", {}, id.split("/").pop()), el("span", { class: "cell-sub" }, label)),
+      el("span", { class: "check", "aria-hidden": "true" }, id === current ? "✓" : ""))),
+  );
+  f.custom.value = known ? "" : current;
 }
 function showProvider(p) {
   draft.provider = p;
   const P = PROVIDERS[p];
-  f.radios.forEach((r) => { r.checked = r.value === p; });
+  for (const b of f.seg.querySelectorAll("button")) b.setAttribute("aria-selected", String(b.dataset.p === p));
   f.key.value = draft.keys[p] || "";
   f.key.placeholder = P.keyPrefix + "...";
-  f.model.value = draft.models[p] || P.defaultModel;
-  document.getElementById("keyLabel").textContent = `${P.name} API key`;
-  document.getElementById("keyDest").textContent = P.name;
-  document.getElementById("modelHint").textContent = P.name;
-  const link = document.getElementById("keyLink");
-  link.href = P.keyLink;
-  document.getElementById("models").replaceChildren(...P.models.map(([id, label]) => el("option", { value: id }, label)));
-  document.getElementById("relaySection").hidden = p !== "groq";
+  document.getElementById("keyFooter").replaceChildren(`Saved only on this device and sent only to ${P.name}. `,
+    el("a", { href: P.keyLink, target: "_blank", rel: "noopener" }, `Get a ${P.name} key`));
+  document.getElementById("relayGroup").hidden = p !== "groq";
+  document.getElementById("forgetBtn").textContent = `Forget ${P.name} key`;
+  renderModels();
 }
-
-document.getElementById("settingsBtn").addEventListener("click", () => {
+function renderSettingsFiles() {
+  const list = document.getElementById("fileRows");
+  const paths = files.paths();
+  document.getElementById("filesGroup").hidden = !paths.length;
+  list.replaceChildren(...paths.map((p) => {
+    const info = fileInfo(p);
+    return el("button", { class: "cell cell-file", type: "button", onclick: () => { openPreview(p); } },
+      el("span", { class: `file-badge small k-${info.kind}`, "aria-hidden": "true" }, info.ext.toUpperCase().slice(0, 4)),
+      el("span", { class: "cell-text" }, el("span", {}, p), el("span", { class: "cell-sub" }, humanSize(files.get(p).bytes.length))),
+      icon("chevron", "ico chev"));
+  }));
+}
+function openSettings() {
   draft = {
     provider: state.settings.provider,
     keys: Object.assign({}, state.settings.keys),
@@ -877,14 +1165,37 @@ document.getElementById("settingsBtn").addEventListener("click", () => {
   f.key.type = "password";
   document.getElementById("toggleKey").textContent = "Show";
   showProvider(draft.provider);
-  f.autoRun.checked = state.settings.autoRun;
+  f.ask.checked = state.settings.askBeforeCode;
   f.relay.value = state.settings.relayUrl;
-  renderFiles();
-  settingsDlg.returnValue = "";
+  renderSettingsFiles();
   settingsDlg.showModal();
-});
-f.radios.forEach((r) => r.addEventListener("change", () => { stashFields(); showProvider(checkedProvider()); }));
-f.key.addEventListener("input", () => {   // pasted the other provider's key? switch to it
+}
+function applySettings() {
+  if (!draft) return;
+  stashFields();
+  const custom = f.custom.value.trim();
+  if (custom) draft.models[draft.provider] = custom;
+  const hadKey = !!apiKey();
+  state.settings.provider = draft.provider;
+  for (const p of Object.keys(PROVIDERS)) {
+    state.settings.keys[p] = draft.keys[p] || "";
+    state.settings.models[p] = draft.models[p] || PROVIDERS[p].defaultModel;
+  }
+  state.settings.askBeforeCode = f.ask.checked;
+  state.settings.relayUrl = f.relay.value.trim();
+  save.settings();
+  draft = null;
+  updateSubtitle();
+  if (hadKey !== !!apiKey() && !state.log.length) renderAll();
+}
+
+document.getElementById("settingsBtn").addEventListener("click", openSettings);
+document.getElementById("titleBtn").addEventListener("click", openSettings);
+document.getElementById("settingsDone").addEventListener("click", () => { applySettings(); settingsDlg.close(); });
+settingsDlg.addEventListener("cancel", () => applySettings());
+settingsDlg.addEventListener("click", (e) => { if (e.target === settingsDlg) { applySettings(); settingsDlg.close(); } });
+for (const b of f.seg.querySelectorAll("button")) b.addEventListener("click", () => { stashFields(); showProvider(b.dataset.p); });
+f.key.addEventListener("input", () => {
   const v = f.key.value.trim();
   const p = detectProvider(v);
   if (p && p !== draft.provider) {
@@ -894,34 +1205,31 @@ f.key.addEventListener("input", () => {   // pasted the other provider's key? sw
     showProvider(p);
   }
 });
+f.custom.addEventListener("input", () => {
+  for (const b of f.models.querySelectorAll(".cell-choice")) { b.setAttribute("aria-checked", "false"); b.querySelector(".check").textContent = ""; }
+  if (!f.custom.value.trim()) renderModels();
+});
 document.getElementById("toggleKey").addEventListener("click", (e) => {
   const show = f.key.type === "password";
   f.key.type = show ? "text" : "password";
   e.currentTarget.textContent = show ? "Hide" : "Show";
 });
-document.getElementById("forgetKey").addEventListener("click", () => {
-  const p = draft ? draft.provider : state.settings.provider;
-  state.settings.keys[p] = "";
-  save.settings(); settingsDlg.close(); renderAll();
-  blob.say(`Forgot your ${PROVIDERS[p].name} key. Poof.`);
+document.getElementById("forgetBtn").addEventListener("click", () => {
+  draft.keys[draft.provider] = "";
+  f.key.value = "";
 });
-settingsDlg.addEventListener("close", () => {
-  if (settingsDlg.returnValue !== "save" || !draft) return;
-  stashFields();
-  const hadKey = !!apiKey();
-  state.settings.provider = draft.provider;
-  for (const p of Object.keys(PROVIDERS)) {
-    state.settings.keys[p] = draft.keys[p] || "";
-    state.settings.models[p] = draft.models[p] || PROVIDERS[p].defaultModel;
-  }
-  state.settings.autoRun = f.autoRun.checked;
-  state.settings.relayUrl = f.relay.value.trim();
-  save.settings();
-  if (hadKey !== !!apiKey() && !state.log.length) renderAll();
-  blob.say(apiKey() ? `Running on ${provider().name}. I feel brand new.` : "No key, no thoughts.");
+document.getElementById("clearFilesBtn").addEventListener("click", () => {
+  for (const p of files.paths()) files.remove(p);
+  renderSettingsFiles();
+  renderAll();
 });
-settingsDlg.addEventListener("click", (e) => { if (e.target === settingsDlg) settingsDlg.close(); });
 
-// boot
-renderAll();
-blob.set("idle");
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+(async () => {
+  updateSubtitle();
+  await files.init();
+  renderAll();
+  updateSendState();
+})();
