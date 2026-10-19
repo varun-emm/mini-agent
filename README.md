@@ -15,7 +15,15 @@ A tiny AI agent that runs in your browser on [Groq](https://groq.com) or [OpenRo
 | Files | Makes Excel, Word, PDF, PowerPoint, PNG charts, CSV, Markdown, HTML, JSON, code and ZIP files |
 | Time | Knows today's date |
 
-While it works, a line in the chat says what it's actually doing ("Searching the web for…", "Installing python-docx", "Creating gst_summary.xlsx"), next to a spinner that speeds up as more steps get done. When it finishes, that line folds into **Worked for 12s**. Tap it to see every step and its output.
+While it works, replies stream in live, and a line in the chat shows what's actually happening:
+
+- the model's own current thought ("The search says 18% for most goods."), one finished sentence at a time
+- the tool call it's writing ("Writing code for gst_summary.xlsx (24 lines)", "Planning a search for…")
+- the tool that's running ("Searching the web for…", "Installing python-docx", "Creating gst_summary.xlsx")
+
+The answer flows in paragraph by paragraph, then the line settles into **Worked for 12s**. Tap it to see every step and its output.
+
+The spinner is your animation, and it turns with the work. Clockwise means it's making something (thinking, writing code or files, writing the answer). Counter-clockwise means it's pulling information in (searching the web, reading a page or file). A slow drift means it's waiting for the model's first word. Its speed follows how fast text is arriving, rising a little with each finished step, and it eases between speeds and directions. It spins down when the work is done.
 
 ## Files
 
@@ -74,7 +82,9 @@ The model only ever writes text. `app.js` is the **harness** around it:
 | System prompt | `systemPrompt()` |
 | Context management | `trimHistory()` drops the oldest turns when the chat gets long |
 | Error recovery | tool errors go back to the model, and malformed tool calls are retried |
-| Status line | `describe()` turns each tool call into plain English |
+| Streaming | `streamLLM()` reads thinking, answer text and tool calls as they're written |
+| Status line | `thoughtSnippet()`, `describeForming()` and `describe()` turn the stream into plain English |
+| Motion | `makeLoader()` (spin speed and direction), `makeTicker()` (status crossfade), `makeStreamer()` (paced answer reveal) |
 | File handling | `files` (stored in IndexedDB), `syncFromPython()`, `openPreview()` |
 | Python sandbox | `py-worker.js`, which installs libraries and auto-saves unsaved charts |
 | Human approval | optional "Run this code?" alert (Settings → Ask before running code) |

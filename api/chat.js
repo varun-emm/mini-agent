@@ -33,5 +33,14 @@ export default async function handler(req, res) {
   });
   res.status(upstream.status);
   res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/json");
-  res.send(await upstream.text());
+  res.setHeader("Cache-Control", "no-cache");
+  if (!upstream.body) return res.send(await upstream.text());
+  // pass streamed replies through as they arrive, so the app can show live progress
+  const reader = upstream.body.getReader();
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    res.write(Buffer.from(value));
+  }
+  res.end();
 }

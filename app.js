@@ -205,11 +205,9 @@ function endpoint() {
   return PROVIDERS.groq.url;
 }
 
-async function callLLM(body, signal) {
-  const name = provider().name;
-  let res;
+async function postLLM(body, signal) {
   try {
-    res = await fetch(endpoint(), {
+    return await fetch(endpoint(), {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey() },
       body: JSON.stringify(body),
@@ -223,26 +221,107 @@ async function callLLM(body, signal) {
     throw new AgentError("Couldn't reach Groq. You may be offline, or Groq may be blocking calls from web pages. " +
       "Switching to an OpenRouter key in Settings fixes the second case.", "network");
   }
+}
+
+// Turn an error from either provider into a plain-English AgentError.
+function apiError(status, err, model) {
+  const name = provider().name;
+  const e = err || {};
+  const code = typeof e.code === "string" ? e.code : "";
+  if (code === "tool_use_failed" || /tool_use_failed/.test(e.message || "")) return new AgentError(e.message || "Malformed tool call", "tool_use_failed");
+  if (status === 401) return new AgentError(`${name} rejected the API key. Check it in Settings.`, "auth");
+  if (status === 402) return new AgentError(`Your ${name} account is out of credits. Top up, or pick a cheaper model in Settings.`, "credits");
+  if (status === 429) return new AgentError(`${name}'s rate limit was hit. Wait a minute, then try again.`, "rate");
+  if (status === 404 && /model/i.test(e.message || "")) {
+    return new AgentError(`${name} doesn't recognise the model "${model}", or it can't use tools. Pick another model in Settings.`, "model");
+  }
+  return new AgentError(`${name} returned an error (${status}): ${e.message || "unknown error"}`, code || "http");
+}
+
+async function callLLM(body, signal) {
+  const res = await postLLM(body, signal);
   let data = null;
   try { data = await res.json(); } catch (_) { /* non-JSON */ }
   const err = (data && data.error) || null;
-  if (!res.ok || err) {
-    const e = err || {};
-    const code = typeof e.code === "string" ? e.code : "";
-    const status = res.ok ? Number(e.code) || 500 : res.status;
-    if (code === "tool_use_failed") throw new AgentError(e.message || "Malformed tool call", "tool_use_failed");
-    if (status === 401) throw new AgentError(`${name} rejected the API key. Check it in Settings.`, "auth");
-    if (status === 402) throw new AgentError(`Your ${name} account is out of credits. Top up, or pick a cheaper model in Settings.`, "credits");
-    if (status === 429) throw new AgentError(`${name}'s rate limit was hit. Wait a minute, then try again.`, "rate");
-    if (status === 404 && /model/i.test(e.message || "")) {
-      throw new AgentError(`${name} doesn't recognise the model "${body.model}", or it can't use tools. Pick another model in Settings.`, "model");
-    }
-    throw new AgentError(`${name} returned an error (${status}): ${e.message || res.statusText}`, code || "http");
-  }
+  if (!res.ok || err) throw apiError(res.ok ? Number(err && err.code) || 500 : res.status, err, body.model);
   if (!data || !Array.isArray(data.choices) || !data.choices[0]) {
-    throw new AgentError(`${name} sent back an empty reply. Try again.`, "empty");
+    throw new AgentError(`${provider().name} sent back an empty reply. Try again.`, "empty");
   }
   return data;
+}
+
+// Streaming version: reports thinking, answer text and tool calls as they are written.
+// on = { reasoning(chunk, all), content(chunk, all), tool(call, index), first() }
+async function streamLLM(body, signal, on = {}) {
+  const res = await postLLM({ ...body, stream: true }, signal);
+  const msg = { content: "", reasoning: "", tool_calls: [] };
+  const fire = (name, ...a) => { try { on[name] && on[name](...a); } catch (_) { /* UI errors never break the loop */ } };
+  const type = res.headers.get("content-type") || "";
+  if (!res.ok || type.includes("application/json")) {   // errors, or a relay that doesn't stream
+    let data = null;
+    try { data = await res.json(); } catch (_) { /* non-JSON */ }
+    const err = (data && data.error) || null;
+    if (!res.ok || err) throw apiError(res.ok ? Number(err && err.code) || 500 : res.status, err, body.model);
+    const m = data && data.choices && data.choices[0] && data.choices[0].message;
+    if (!m) throw new AgentError(`${provider().name} sent back an empty reply. Try again.`, "empty");
+    fire("first");
+    if (m.reasoning) { msg.reasoning = m.reasoning; fire("reasoning", m.reasoning, msg.reasoning); }
+    (m.tool_calls || []).forEach((tc, i) => { msg.tool_calls[i] = tc; fire("tool", tc, i); });
+    if (m.content) { msg.content = m.content; fire("content", m.content, msg.content); }
+    return msg;
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let started = false;
+  let done = false;
+  const handle = (line) => {
+    if (!line.startsWith("data:")) return;          // blank lines and ": keep-alive" comments
+    const payload = line.slice(5).trim();
+    if (!payload) return;
+    if (payload === "[DONE]") { done = true; return; }
+    let chunk;
+    try { chunk = JSON.parse(payload); } catch (_) { return; }
+    if (chunk.error) throw apiError(Number(chunk.error.code) || 500, chunk.error, body.model);
+    const choice = chunk.choices && chunk.choices[0];
+    if (!choice) return;
+    if (choice.error) throw apiError(500, choice.error, body.model);
+    const d = choice.delta || {};
+    if (!started) { started = true; fire("first"); }
+    let think = typeof d.reasoning === "string" ? d.reasoning : typeof d.reasoning_content === "string" ? d.reasoning_content : "";
+    if (!think && Array.isArray(d.reasoning_details)) {
+      think = d.reasoning_details.map((r) => r.text || r.summary || "").join("");
+    }
+    if (think) { msg.reasoning += think; fire("reasoning", think, msg.reasoning); }
+    if (typeof d.content === "string" && d.content) { msg.content += d.content; fire("content", d.content, msg.content); }
+    for (const tc of d.tool_calls || []) {
+      const i = typeof tc.index === "number" ? tc.index : msg.tool_calls.length;
+      const slot = msg.tool_calls[i] || (msg.tool_calls[i] = { id: "", type: "function", function: { name: "", arguments: "" } });
+      if (tc.id) slot.id = tc.id;
+      const fn = tc.function || {};
+      if (fn.name && fn.name !== slot.function.name) slot.function.name = slot.function.name ? slot.function.name + fn.name : fn.name;
+      if (typeof fn.arguments === "string") slot.function.arguments += fn.arguments;
+      fire("tool", slot, i);
+    }
+  };
+  while (!done) {
+    const { value, done: end } = await reader.read();
+    if (end) break;
+    buffer += decoder.decode(value, { stream: true });
+    let nl;
+    while ((nl = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, nl).replace(/\r$/, "");
+      buffer = buffer.slice(nl + 1);
+      handle(line);
+      if (done) break;
+    }
+  }
+  if (buffer.trim()) handle(buffer.trim());
+  try { reader.cancel(); } catch (_) { /* already closed */ }
+  msg.tool_calls = msg.tool_calls.filter(Boolean).map((tc, i) => ({ ...tc, id: tc.id || `call_${Date.now()}_${i}` }));
+  if (!started) throw new AgentError(`${provider().name} sent back an empty reply. Try again.`, "empty");
+  return msg;
 }
 
 // ---------------------------------------------------------------------------
@@ -521,6 +600,52 @@ function describe(name, args, done) {
   }
 }
 const parseArgs = (raw) => { try { return JSON.parse(raw || "{}"); } catch (_) { return {}; } };
+
+// The latest complete-ish sentence of the model's thinking, cleaned up for one status line.
+function thoughtSnippet(text, max = 90) {
+  const clean = String(text || "").replace(/[*_`#>]+/g, "").replace(/\s+/g, " ").trim();
+  if (!clean) return "";
+  const parts = clean.split(/(?<=[.!?:;])\s+/).filter((p) => p.trim().length > 2);
+  let s = parts[parts.length - 1] || clean;
+  if (s.length < 24 && parts.length > 1) s = parts[parts.length - 2] + " " + s;   // too short to read on its own
+  s = s.replace(/^(so|ok(ay)?|well|now|then|alright)[, ]+/i, "").trim();
+  if (s.length > max) s = "…" + s.slice(s.length - max + 1).replace(/^\S*\s/, "");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+// Read a string field out of JSON arguments that are still being written ("{"query": "rbi rep").
+function partialField(raw, field) {
+  const m = String(raw || "").match(new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`));
+  if (!m) return "";
+  try { return JSON.parse(`"${m[1].replace(/\\$/, "")}"`); } catch (_) { return m[1]; }
+}
+
+// What a tool call looks like while the model is still writing it.
+function describeForming(name, raw) {
+  switch (name) {
+    case "web_search": { const q = partialField(raw, "query"); return q ? `Planning a search for ${quote(q)}` : "Deciding what to search for"; }
+    case "fetch_webpage": { const u = partialField(raw, "url"); return u.length > 10 ? `Opening ${hostOf(u)}` : "Picking a page to read"; }
+    case "calculator": { const x = partialField(raw, "expression"); return x ? `Setting up ${x.slice(0, 50)}` : "Setting up a calculation"; }
+    case "run_python": {
+      const code = partialField(raw, "code");
+      const lines = code ? code.split("\n").length : 0;
+      const names = filesInCode(code);
+      const what = names.length ? `code for ${listNames(names)}` : "Python code";
+      return lines ? `Writing ${what} (${lines} line${lines === 1 ? "" : "s"})` : "Starting to write Python code";
+    }
+    case "write_file": {
+      const p = partialField(raw, "path");
+      const c = partialField(raw, "content");
+      return p ? `Writing ${p}${c ? ` (${humanSize(enc.encode(c).length)})` : ""}` : "Starting a file";
+    }
+    case "read_file": { const p = partialField(raw, "path"); return p ? `Opening ${p}` : "Choosing a file to read"; }
+    default: return `Preparing ${name.replace(/_/g, " ")}`;
+  }
+}
+
+// Which way the loader turns: tools that pull information in run it backwards; tools that make things run it forwards.
+const PULL_TOOLS = new Set(["web_search", "fetch_webpage", "read_file", "list_files", "get_current_time"]);
+
 function stepDetail(name, args, result) {
   if (name === "run_python") return `${args.code || ""}\n\n— Output —\n${result}`;
   if (name === "calculator") return `${args.expression} = ${result}`;
@@ -576,7 +701,7 @@ async function runTurn(text) {
   state.history.push({ role: "user", content: text });
   const userEntry = { kind: "user", text };
   state.log.push(userEntry);
-  renderEntry(userEntry);
+  renderEntry(userEntry, true);
 
   const turn = { kind: "agent", text: "", steps: [], files: [], ms: 0 };
   const view = liveTurn(turn);
@@ -589,28 +714,33 @@ async function runTurn(text) {
   setRunningUI(true);
   let badCalls = 0;
 
-  const finish = (patch) => {
+  const finish = async (patch) => {
     Object.assign(turn, patch);
     turn.ms = Date.now() - started;
     turn.files = files.paths().filter((p) => before.get(p) !== files.get(p).mtime);
-    view.finish();
+    await view.finish();
   };
 
   try {
     for (let step = 1; step <= MAX_STEPS; step++) {
-      // THINK
+      // THINK (streamed, so the status can show what's actually going on)
       const thinkStart = Date.now();
-      view.status("Thinking");
-      let data;
+      view.waiting(currentModel());
+      let msg;
       try {
-        data = await callLLM({
+        msg = await streamLLM({
           model: currentModel(),
           messages: [{ role: "system", content: systemPrompt() }, ...state.history],
           tools: TOOLS, tool_choice: "auto", temperature: 0.3,
-        }, signal);
+        }, signal, {
+          reasoning: (chunk, all) => view.thinking(all, chunk.length),
+          content: (chunk, all) => view.answer(all, chunk.length),
+          tool: (call) => view.forming(call.function.name, call.function.arguments),
+        });
       } catch (e) {
         if (e.code === "tool_use_failed" && badCalls < 2) {
           badCalls++;
+          view.dropAnswer();
           view.addStep({ icon: "retry", label: "Retried a tool call that came out garbled", detail: e.message });
           state.history.push({ role: "user", content: "[harness note] Your last tool call was malformed and was not run. Retry with valid JSON arguments that match the tool's schema." });
           continue;
@@ -618,14 +748,16 @@ async function runTurn(text) {
         throw e;
       }
 
-      const msg = data.choices[0].message;
       if (msg.reasoning) {
         view.addStep({ icon: "think", label: `Thought for ${fmtDuration(Date.now() - thinkStart)}`, detail: msg.reasoning });
       }
 
       // ACT + OBSERVE
       if (msg.tool_calls && msg.tool_calls.length) {
-        if (msg.content) view.addStep({ icon: "note", label: "Planned the next step", detail: msg.content });
+        if (msg.content) {   // a note to itself before using a tool, not the final answer
+          view.dropAnswer();
+          view.addStep({ icon: "note", label: thoughtSnippet(msg.content, 70) || "Planned the next step", detail: msg.content });
+        }
         state.history.push({
           role: "assistant",
           content: msg.content || null,
@@ -636,10 +768,10 @@ async function runTurn(text) {
         for (const tc of msg.tool_calls) {
           const name = tc.function.name;
           const args = parseArgs(tc.function.arguments);
-          view.status(describe(name, args, false));
+          view.running(name, args);
           const result = await executeTool(name, tc.function.arguments, {
             signal,
-            onProgress: (p) => view.status(p === "Running Python" ? describe(name, args, false) : p),
+            onProgress: (p) => view.progress(p === "Running Python" ? describe(name, args, false) : p),
           });
           const failed = /^Error/.test(result) || /exit code: 1/.test(result);
           view.addStep({ icon: name, label: describe(name, args, true) + (failed ? " (hit an error)" : ""), detail: stepDetail(name, args, result) });
@@ -649,19 +781,20 @@ async function runTurn(text) {
       }
 
       // CHECK -> DONE
-      finish({ text: msg.content || "(It finished without saying anything. Try rephrasing.)" });
-      state.history.push({ role: "assistant", content: turn.text });
+      state.history.push({ role: "assistant", content: msg.content || "" });
+      await finish({ text: msg.content || "(It finished without saying anything. Try rephrasing.)" });
       return;
     }
-    finish({ text: `I stopped after ${MAX_STEPS} steps without finishing. Say "continue" to let me keep going.` });
-    state.history.push({ role: "assistant", content: turn.text });
+    state.history.push({ role: "assistant", content: `I stopped after ${MAX_STEPS} steps without finishing.` });
+    await finish({ text: `I stopped after ${MAX_STEPS} steps without finishing. Say "continue" to let me keep going.` });
   } catch (e) {
     if (e.name === "AbortError") {
-      finish({ text: "", stopped: true });
-      state.history.push({ role: "assistant", content: "(The user stopped this request.)" });
+      const partial = view.partialAnswer();
+      state.history.push({ role: "assistant", content: partial ? partial + "\n\n(The user stopped this reply.)" : "(The user stopped this request.)" });
+      await finish({ text: partial, stopped: true });
     } else {
-      finish({ kind: "error", text: e.message, retry: text });
       if (state.history.length && state.history[state.history.length - 1].role === "user") state.history.pop();
+      await finish({ kind: "error", text: e.message, retry: text });
     }
   } finally {
     state.running = false;
@@ -720,11 +853,17 @@ if (window.DOMPurify) {
     if (node.tagName === "A") { node.setAttribute("target", "_blank"); node.setAttribute("rel", "noopener"); }
   });
 }
+function mdHTML(text) {
+  if (window.marked && window.DOMPurify) return DOMPurify.sanitize(marked.parse(text));
+  const d = document.createElement("div"); d.textContent = text; return `<p style="white-space:pre-wrap">${d.innerHTML}</p>`;
+}
 function markdown(text) {
   const div = el("div", { class: "md" });
-  if (window.marked && window.DOMPurify) div.innerHTML = DOMPurify.sanitize(marked.parse(text));
-  else { div.style.whiteSpace = "pre-wrap"; div.textContent = text; }
-  // links and images that point at the agent's own files open the preview instead of a dead URL
+  div.innerHTML = mdHTML(text);
+  return wireFiles(div);
+}
+// links and images that point at the agent's own files open the preview instead of a dead URL
+function wireFiles(div) {
   for (const a of div.querySelectorAll("a[href]")) {
     const p = decodeURIComponent(a.getAttribute("href")).replace(/^\.?\//, "").replace(/^sandbox:\/?(mnt\/data\/)?/, "");
     if (files.has(p)) { a.removeAttribute("target"); a.addEventListener("click", (e) => { e.preventDefault(); openPreview(p); }); }
@@ -748,23 +887,157 @@ const nearBottom = () => ui.chat.scrollHeight - ui.chat.scrollTop - ui.chat.clie
 const scrollDown = (force) => { if (force || nearBottom()) ui.chat.scrollTop = ui.chat.scrollHeight; };
 
 // ---------------------------------------------------------------------------
-// The loader: your GIF, spinning faster as more of the task gets done
+// The loader: your GIF, turning with the work.
+//   clockwise        = making something (thinking, writing code or files, writing the answer)
+//   counter-clockwise = pulling information in (web search, reading a page or file)
+//   slow drift       = waiting for the model's first word
+// Speed follows how fast text is arriving, plus a little more for every finished step.
+// It eases between speeds (even through a change of direction) and spins down when done.
 // ---------------------------------------------------------------------------
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+const LOADER_MOODS = {
+  waiting: { dir: 1, base: 0.35 },
+  thinking: { dir: 1, base: 0.8 },
+  forming: { dir: 1, base: 1.1 },
+  pull: { dir: -1, base: 1.6 },
+  make: { dir: 1, base: 2.0 },
+  answer: { dir: 1, base: 0.9 },
+  done: { dir: 1, base: 0 },
+};
 function makeLoader() {
   const img = el("img", { class: "loader", src: reduceMotion ? "assets/loader-still.png" : "assets/loader.webp", alt: "" });
   let anim = null;
   if (!reduceMotion && img.animate) {
     anim = img.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }], { duration: 2400, iterations: Infinity });
+    anim.playbackRate = 0.35;
   }
+  let mood = LOADER_MOODS.waiting;
+  let flow = 0;          // smoothed characters per second arriving from the model
+  let steps = 0;
+  let rate = 0.35;
+  let raf = 0;
+  let last = performance.now();
+  const tick = (now) => {
+    const dt = Math.min(0.1, (now - last) / 1000); last = now;
+    flow *= Math.exp(-dt * 2.5);                                         // speed fades when text stops arriving
+    const boost = Math.min(2.4, Math.log2(1 + flow / 120));             // ~1x extra at 120 chars/s, capped
+    const target = mood.base === 0 ? 0 : mood.dir * (mood.base + boost) * (1 + Math.min(steps, 8) * 0.06);
+    rate += (target - rate) * Math.min(1, dt * 4);                      // ease, never jump
+    if (anim) anim.playbackRate = Math.abs(rate) < 0.01 && target === 0 ? 0 : rate;
+    if (target === 0 && Math.abs(rate) < 0.02) { raf = 0; return; }
+    raf = requestAnimationFrame(tick);
+  };
+  const run = () => { if (anim && !raf) { last = performance.now(); raf = requestAnimationFrame(tick); } };
+  run();
   return {
     node: img,
-    progress(stepsDone) {   // 1x at the start, up to 4x as steps pile up
-      if (!anim) return;
-      const rate = Math.min(4, 1 + stepsDone * 0.45);
-      if (anim.updatePlaybackRate) anim.updatePlaybackRate(rate); else anim.playbackRate = rate;
+    mood(name) { mood = LOADER_MOODS[name] || LOADER_MOODS.thinking; run(); },
+    feed(chars) { flow += chars * 4; run(); },                         // called for every streamed chunk
+    step() { steps++; run(); },
+    get direction() { return rate < 0 ? -1 : 1; },
+    get rate() { return rate; },
+    async spinDown() {
+      mood = LOADER_MOODS.done; run();
+      await new Promise((r) => setTimeout(r, reduceMotion ? 0 : 650));
+      img.classList.add("loader-out");
+      await new Promise((r) => setTimeout(r, reduceMotion ? 0 : 280));
+      if (raf) cancelAnimationFrame(raf);
+      if (anim) anim.cancel();
+      img.remove();
     },
-    stop() { if (anim) anim.cancel(); },
+  };
+}
+
+// Swap a line of text with a soft crossfade (old line drifts up and fades, new one rises in).
+// Each line says how long it must stay readable ("hold"): placeholders give way at once,
+// a real thought stays about a second. Anything arriving sooner waits its turn, newest first.
+function makeTicker(node) {
+  let key = null;
+  let holdUntil = 0;
+  let queued = null;
+  let timer = 0;
+  const swap = (text, k, hold) => {
+    key = k; holdUntil = performance.now() + hold;
+    const prev = node.querySelector(".tick:not(.tick-out)");
+    const next = el("span", { class: "tick" + (prev && !reduceMotion ? " tick-in" : "") }, text);
+    if (prev) {
+      if (reduceMotion) prev.remove();
+      else { prev.classList.add("tick-out"); setTimeout(() => prev.remove(), 220); }
+    }
+    node.append(next);
+  };
+  const flush = () => {
+    timer = 0;
+    if (!queued) return;
+    const [t, k, h] = queued; queued = null;
+    swap(t, k, h);
+  };
+  return {
+    set(text, k = text, hold = 0, force = false, maxWait = Infinity) {
+      if (k === key && !queued) {              // same kind of status: just update the words in place
+        const cur = node.querySelector(".tick:not(.tick-out)");
+        if (cur) cur.textContent = text;
+        return;
+      }
+      const wait = Math.min(holdUntil - performance.now(), maxWait);
+      if (wait > 0 && !force) {
+        queued = [text, k, hold];
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(flush, wait);
+        return;
+      }
+      if (timer) { clearTimeout(timer); timer = 0; queued = null; }
+      swap(text, k, hold);
+    },
+    get text() { return (node.querySelector(".tick:not(.tick-out)") || {}).textContent || ""; },
+  };
+}
+
+// Reveals streamed markdown smoothly: text is paced so bursts don't land all at once,
+// finished blocks stay put, and each new paragraph, list or table fades in.
+function makeStreamer(container) {
+  let target = "";
+  let shown = 0;
+  let raf = 0;
+  let lastParse = 0;
+  let waiters = [];
+  const render = (text) => {
+    const tmp = document.createElement("div");
+    tmp.innerHTML = mdHTML(text);
+    const fresh = [...tmp.children];
+    const old = [...container.children];
+    fresh.forEach((node, i) => {
+      if (i < old.length - 1 && old[i].outerHTML === node.outerHTML) return;   // settled block, leave it alone
+      if (i < old.length) {
+        if (old[i].outerHTML !== node.outerHTML) {
+          if (old[i].tagName === node.tagName) old[i].innerHTML = node.innerHTML; else old[i].replaceWith(node);
+        }
+      } else {
+        if (!reduceMotion) node.classList.add("stream-in");
+        container.append(node);
+      }
+    });
+    for (let i = fresh.length; i < old.length; i++) old[i].remove();
+  };
+  const tick = (now) => {
+    const backlog = target.length - shown;
+    if (backlog > 0) {
+      shown += reduceMotion ? backlog : Math.max(2, Math.ceil(backlog * 0.09));
+      shown = Math.min(shown, target.length);
+      if (now - lastParse > 32 || shown === target.length) { lastParse = now; render(target.slice(0, shown)); scrollDown(); }
+    }
+    if (shown >= target.length) {
+      raf = 0;
+      const w = waiters; waiters = []; w.forEach((r) => r());
+      return;
+    }
+    raf = requestAnimationFrame(tick);
+  };
+  return {
+    set(text) { target = text; if (!raf) raf = requestAnimationFrame(tick); },
+    settled() { return shown >= target.length ? Promise.resolve() : new Promise((r) => { waiters.push(r); if (!raf) raf = requestAnimationFrame(tick); }); },
+    clear() { target = ""; shown = 0; container.replaceChildren(); },
+    get text() { return target; },
   };
 }
 
@@ -822,10 +1095,18 @@ function filesNode(paths) {
   return wrap;
 }
 
-function renderEntry(entry) {
-  document.querySelector(".empty")?.remove();
+function leaveEmpty() {
+  const empty = document.querySelector(".empty");
+  if (!empty) return;
+  if (reduceMotion) { empty.remove(); return; }
+  empty.classList.add("empty-out");
+  setTimeout(() => empty.remove(), 260);
+}
+
+function renderEntry(entry, animate = false) {
+  if (animate) leaveEmpty(); else document.querySelector(".empty")?.remove();
   if (entry.kind === "user") {
-    ui.thread.append(el("div", { class: "row user" }, el("div", { class: "bubble" }, entry.text)));
+    ui.thread.append(el("div", { class: "row user" + (animate && !reduceMotion ? " bubble-in" : "") }, el("div", { class: "bubble" }, entry.text)));
     scrollDown(true);
     return;
   }
@@ -847,29 +1128,124 @@ function renderEntry(entry) {
   scrollDown();
 }
 
+// The turn that's in progress. It stays on screen and settles into its final form in place,
+// so nothing is swapped out or jumps when the answer lands.
 function liveTurn(turn) {
   const loader = makeLoader();
-  const text = el("span", { class: "status-text" }, "Thinking");
-  const summary = el("summary", {}, loader.node, text, icon("chevron", "ico chev"));
-  const list = el("div");
-  const live = el("details", { class: "activity live" }, summary, list);
-  const row = el("div", { class: "row agent" }, live);
+  const statusBox = el("span", { class: "status-text" });
+  const ticker = makeTicker(statusBox);
+  const summary = el("summary", {}, loader.node, statusBox, icon("chevron", "ico chev"));
+  const steps = el("ol", { class: "steps" });
+  const live = el("details", { class: "activity live" }, summary, steps);
+  const answerBox = el("div", { class: "md streaming" });
+  const row = el("div", { class: "row agent" + (reduceMotion ? "" : " turn-in") }, live, answerBox);
   ui.thread.append(row);
   scrollDown(true);
+  const streamer = makeStreamer(answerBox);
+  const shortModel = (m) => m.split("/").pop();
+  let phase = "";
+  let thoughtShown = "";
+
+  const setStatus = (text, key, hold, force, maxWait) => { ticker.set(text, key, hold, force, maxWait); scrollDown(); };
+  const addStepRow = (s) => {
+    const label = s.label || "Step";
+    const head = el("span", { class: "step-label" }, icon(s.icon || "note", "ico step-ico"), el("span", {}, label));
+    const li = el("li", { class: "step" + (reduceMotion ? "" : " step-in") });
+    if (s.detail) li.append(el("details", {}, el("summary", {}, head), el("pre", { class: "step-detail" }, truncate(s.detail, 5000))));
+    else li.append(head);
+    steps.append(li);
+  };
+
   return {
-    status(t) { text.textContent = t; scrollDown(); },
+    waiting(model) {
+      phase = "waiting"; thoughtShown = "";
+      loader.mood("waiting");
+      setStatus(turn.steps.length ? `Waiting for ${shortModel(model)} to decide the next step` : `Waiting for ${shortModel(model)}`, "waiting");
+    },
+    thinking(all, chars) {
+      loader.feed(chars);
+      if (phase !== "thinking") { phase = "thinking"; loader.mood("thinking"); setStatus("Thinking", "thinking-start"); }
+      // only show finished sentences, so a thought never appears half-written
+      const sentence = thoughtSnippet(all.replace(/[^.!?:;\n]*$/, ""));
+      if (!sentence || sentence.length < 16 || sentence === thoughtShown) return;
+      thoughtShown = sentence;
+      setStatus(sentence, "thought:" + sentence, 1100);   // stays at least ~1s so it can be read
+    },
+    forming(name, raw) {
+      loader.feed(8);
+      if (phase !== "forming") { phase = "forming"; loader.mood("forming"); }
+      setStatus(describeForming(name, raw), "forming:" + name, 600);
+    },
+    running(name, args) {
+      phase = "running";
+      loader.mood(PULL_TOOLS.has(name) ? "pull" : "make");
+      setStatus(describe(name, args, false), "run:" + name + JSON.stringify(args).slice(0, 80), 700, false, 350);   // real actions cut in quickly
+    },
+    progress(text) { setStatus(text, "progress:" + text, 500); },
+    answer(all, chars) {
+      loader.feed(chars);
+      if (phase !== "answer") { phase = "answer"; loader.mood("answer"); setStatus("Writing the answer", "answer", 0); }
+      streamer.set(all);
+    },
+    dropAnswer() {                       // text that turned out to be a note before a tool call
+      if (!streamer.text) return;
+      if (reduceMotion) { streamer.clear(); return; }
+      answerBox.classList.add("fade-away");
+      setTimeout(() => { streamer.clear(); answerBox.classList.remove("fade-away"); }, 220);
+    },
+    partialAnswer() { return streamer.text; },
     addStep(step) {
       turn.steps.push(step);
-      list.replaceChildren(stepsList(turn.steps));
-      loader.progress(turn.steps.length);
+      addStepRow(step);
+      loader.step();
       scrollDown();
     },
-    finish() {
-      loader.stop();
-      row.remove();
+    async finish() {
+      // 1) let the answer finish flowing in
+      if (turn.kind !== "error" && turn.text) {
+        streamer.set(turn.text);
+        await streamer.settled();
+      }
+      // 2) the status line settles into a summary, and the loader spins down
+      const onlyThought = turn.steps.length === 1 && turn.steps[0].icon === "think";
+      const label = turn.kind === "error" ? (turn.steps.length ? `Worked for ${fmtDuration(turn.ms)}` : "")
+        : turn.stopped ? "Stopped"
+        : !turn.steps.length ? ""
+        : onlyThought ? turn.steps[0].label : `Worked for ${fmtDuration(turn.ms)}`;
+      const spin = loader.spinDown();
+      if (label) ticker.set(label, "final", 0, true);
+      live.classList.remove("live");
+      if (!label) {
+        if (reduceMotion) live.remove();
+        else {   // fold the status row away smoothly (height can't animate from "auto", so pin it first)
+          live.style.overflow = "hidden";
+          live.style.maxHeight = live.offsetHeight + "px";
+          void live.offsetHeight;
+          live.style.transition = "max-height 340ms ease, opacity 220ms ease, margin 340ms ease";
+          live.style.maxHeight = "0px"; live.style.opacity = "0"; live.style.marginBottom = "-12px";
+          setTimeout(() => live.remove(), 380);
+        }
+      }
+      // 3) final content: the answer re-rendered with working file links, or the error
+      answerBox.classList.remove("streaming");
+      if (turn.kind === "error") {
+        answerBox.replaceWith(el("div", { class: "error" + (reduceMotion ? "" : " fade-in"), role: "alert" }, icon("alert", "ico err-ico"),
+          el("div", {}, el("p", {}, turn.text),
+            turn.retry ? el("button", { class: "text-btn", type: "button", onclick: () => submit(turn.retry) }, "Try again") : null)));
+      } else if (turn.text) {
+        answerBox.innerHTML = mdHTML(turn.text);
+        wireFiles(answerBox);
+      } else answerBox.remove();
+      // 4) files rise in one after another
+      const fl = filesNode(turn.files);
+      if (fl) {
+        if (!reduceMotion) [...fl.querySelectorAll(".image-card, .file-card")].forEach((n, i) => { n.classList.add("rise-in"); n.style.animationDelay = `${i * 70}ms`; });
+        row.append(fl);
+      }
+      row.classList.remove("turn-in");
       state.log.push(turn);
-      renderEntry(turn);
-      scrollDown(true);
+      scrollDown();
+      await spin;
     },
   };
 }
