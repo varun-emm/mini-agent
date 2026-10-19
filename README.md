@@ -13,6 +13,7 @@ A tiny AI agent that runs in your browser on [Groq](https://groq.com) or [OpenRo
 | Calculator | Exact maths, so the model never guesses numbers |
 | Python | Runs real Python in your browser with [Pyodide](https://pyodide.org). Libraries like openpyxl, python-docx, python-pptx and fpdf2 install by themselves the first time they're used |
 | Files | Makes Excel, Word, PDF, PowerPoint, PNG charts, CSV, Markdown, HTML, JSON, code and ZIP files |
+| Screenshot | Takes a screenshot of a file it made (chart, PDF, Word, Excel, CSV, HTML) or of a web page, and has a vision model check it |
 | Time | Knows today's date |
 
 While it works, replies stream in live, and a line in the chat shows what's actually happening:
@@ -23,7 +24,31 @@ While it works, replies stream in live, and a line in the chat shows what's actu
 
 The answer flows in paragraph by paragraph, then the line settles into **Worked for 12s**. Tap it to see every step and its output.
 
-The spinner is your animation, and it turns with the work. Clockwise means it's making something (thinking, writing code or files, writing the answer). Counter-clockwise means it's pulling information in (searching the web, reading a page or file). A slow drift means it's waiting for the model's first word. Its speed follows how fast text is arriving, rising a little with each finished step, and it eases between speeds and directions. It spins down when the work is done.
+The spinner is your animation, and it turns and pulses with the work:
+
+| What's happening | Spin | Pulse | Glow |
+|---|---|---|---|
+| Waiting for the model's first word | slow drift | slow, even breath | blue |
+| Thinking | clockwise | breath that quickens as words arrive | violet |
+| Searching, reading, looking at a screenshot | counter-clockwise | draws in (shrinks) on each beat | teal |
+| Making a file or running code | clockwise, fast | strong double heartbeat | pink |
+| Writing the answer | clockwise | gentle beat on each burst of words | blue |
+
+Speed follows how fast text is arriving, every finished step gives it a little pop, and it eases between moods. When the work is done it swells once and shrinks away.
+
+## It checks its own work
+
+Mini Agent has a **screenshot** tool. After it makes a chart, PDF, Word, Excel, CSV or HTML file, it takes a screenshot and asks a vision model a specific question, such as "Are the axis labels readable?" or "Does the total read ₹10,62,000?". If something's wrong, it fixes the file and checks again. It can also screenshot a web page to see what it looks like.
+
+- You see each screenshot in the steps under the answer. Tap it to view it full size.
+- Files are drawn inside the browser: images as they are, PDFs with [pdf.js](https://mozilla.github.io/pdf.js/), and documents and web pages with [html-to-image](https://github.com/bubkoo/html-to-image) inside a sandboxed frame, so a page the agent made can't reach this app or your keys.
+- Web pages are captured by [Microlink](https://microlink.io). Without a key it allows about 25 screenshots a day.
+- The vision model is set in **Settings → Vision model**: `qwen/qwen3.8-27b` on Groq, and `anthropic/claude-haiku-5.5` on OpenRouter by default.
+- PowerPoint files can't be screenshotted. The agent checks those by reading them with python-pptx.
+
+## Chat history
+
+Every conversation is saved on your device. Tap the sidebar button (top left) to see them, grouped by day, with search. Tap **Edit** to delete chats. Each chat keeps its own files, and the pencil button (top right) starts a new chat.
 
 ## Files
 
@@ -32,7 +57,7 @@ Every file the agent makes shows up under its answer as a card. Charts and image
 - **Tap a card** to preview it. Excel sheets, Word documents, PDFs, CSVs, images, Markdown and code all preview in the app. PowerPoint files don't preview, but you can still share or download them.
 - **Share** (iPhone and Android) opens the system share sheet: Save to Files, AirDrop, WhatsApp, Mail.
 - **Download** saves the file to your device.
-- Files are kept on your device (in the browser's storage) between visits. Manage them in **Settings → Files**.
+- Files are kept on your device (in the browser's storage) between visits, with each chat's files kept separately. Manage them in **Settings → Files in this chat**.
 
 ## One-time setup
 
@@ -71,7 +96,7 @@ The model only ever writes text. `app.js` is the **harness** around it:
 1. **Think:** send the chat, a system prompt and the tool menu to the model (Groq or OpenRouter).
 2. **Act:** if the reply asks for a tool, run that tool in the browser.
 3. **Observe:** add the tool's result to the conversation.
-4. **Check:** repeat until the model answers without asking for a tool, with a limit of 15 steps.
+4. **Check:** repeat until the model answers without asking for a tool, with a limit of 20 steps.
 
 | Concept | Where it lives |
 |---|---|
@@ -84,7 +109,9 @@ The model only ever writes text. `app.js` is the **harness** around it:
 | Error recovery | tool errors go back to the model, and malformed tool calls are retried |
 | Streaming | `streamLLM()` reads thinking, answer text and tool calls as they're written |
 | Status line | `thoughtSnippet()`, `describeForming()` and `describe()` turn the stream into plain English |
-| Motion | `makeLoader()` (spin speed and direction), `makeTicker()` (status crossfade), `makeStreamer()` (paced answer reveal) |
+| Motion | `makeLoader()` (spin, pulse and glow), `makeTicker()` (status crossfade), `makeStreamer()` (paced answer reveal) |
+| Screenshots | `fileShot()`, `webShot()`, `renderHtmlShot()`, `pdfShot()`, then `lookAt()` asks the vision model |
+| Chat history | `chats`, `openChat()`, `renderChatList()` (stored in IndexedDB) |
 | File handling | `files` (stored in IndexedDB), `syncFromPython()`, `openPreview()` |
 | Python sandbox | `py-worker.js`, which installs libraries and auto-saves unsaved charts |
 | Human approval | optional "Run this code?" alert (Settings → Ask before running code) |

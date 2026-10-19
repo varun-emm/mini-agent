@@ -13,6 +13,8 @@ const PROVIDERS = {
     keyLink: "https://console.groq.com/keys",
     defaultModel: "openai/gpt-oss-120b",
     searchModel: "groq/compound-mini",          // Groq model with built-in web search
+    visionModel: "qwen/qwen3.8-27b",             // looks at screenshots
+    visionModels: [["qwen/qwen3.8-27b", "Reads images, up to 3 per request"]],
     models: [["openai/gpt-oss-120b", "Smartest"], ["openai/gpt-oss-20b", "Fastest"], ["qwen/qwen3.8-27b", "Preview"]],
   },
   openrouter: {
@@ -22,6 +24,8 @@ const PROVIDERS = {
     keyLink: "https://openrouter.ai/settings/keys",
     defaultModel: "openai/gpt-oss-120b",
     searchModel: "openai/gpt-oss-120b",         // cheap model + OpenRouter's "web" plugin
+    visionModel: "anthropic/claude-haiku-5.5",
+    visionModels: [["anthropic/claude-haiku-5.5", "Sharp at reading documents"], ["openai/gpt-6-luna", "Fast and cheap"], ["qwen/qwen3.8-omni-flash", "Cheap alternative"]],
     models: [["openai/gpt-oss-120b", "Cheap and capable"], ["anthropic/claude-sonnet-5.5", "Smarter, costs more"]],
   },
 };
@@ -50,6 +54,7 @@ function loadSettings() {
     provider: "groq",
     keys: { groq: "", openrouter: "" },
     models: { groq: PROVIDERS.groq.defaultModel, openrouter: PROVIDERS.openrouter.defaultModel },
+    visionModels: { groq: PROVIDERS.groq.visionModel, openrouter: PROVIDERS.openrouter.visionModel },
     askBeforeCode: false,
     relayUrl: "",
   };
@@ -58,6 +63,7 @@ function loadSettings() {
   if (PROVIDERS[saved.provider]) s.provider = saved.provider;
   Object.assign(s.keys, saved.keys || {});
   Object.assign(s.models, saved.models || {});
+  Object.assign(s.visionModels, saved.visionModels || {});
   if (typeof saved.askBeforeCode === "boolean") s.askBeforeCode = saved.askBeforeCode;
   if (typeof saved.relayUrl === "string") s.relayUrl = saved.relayUrl;
   if (!s.keys[s.provider]) {
@@ -75,8 +81,9 @@ function detectProvider(key) {
 
 const state = {
   settings: loadSettings(),
-  history: store.get("ma.history", []),   // what the model sees (without the system prompt)
-  log: store.get("ma.log", []),           // what the chat shows
+  chat: null,          // the conversation that's open (null = a fresh, unsaved one)
+  history: [],         // what the model sees (without the system prompt)
+  log: [],             // what the chat shows
   running: false,
   abort: null,
 };
@@ -84,58 +91,138 @@ const state = {
 const provider = () => PROVIDERS[state.settings.provider];
 const apiKey = () => state.settings.keys[state.settings.provider] || "";
 const currentModel = () => state.settings.models[state.settings.provider] || provider().defaultModel;
-const save = {
-  settings: () => store.set("ma.settings", state.settings),
-  chat: () => { store.set("ma.history", state.history); store.set("ma.log", state.log); },
+const visionModel = () => state.settings.visionModels[state.settings.provider] || provider().visionModel;
+
+// ---------------------------------------------------------------------------
+// IndexedDB: chats and file bytes live here, on this device only
+// ---------------------------------------------------------------------------
+const db = {
+  handle: null,
+  async open() {
+    try {
+      this.handle = await new Promise((resolve, reject) => {
+        const req = indexedDB.open("mini-agent", 2);
+        req.onupgradeneeded = () => {
+          const d = req.result;
+          if (!d.objectStoreNames.contains("files")) d.createObjectStore("files", { keyPath: "path" });
+          if (!d.objectStoreNames.contains("chats")) d.createObjectStore("chats", { keyPath: "id" });
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+      });
+      this.handle.onversionchange = () => this.handle.close();
+    } catch (_) { this.handle = null; /* private mode etc: keep things in memory for this visit */ }
+  },
+  all(name) {
+    if (!this.handle) return Promise.resolve([]);
+    return new Promise((resolve) => {
+      try {
+        const req = this.handle.transaction(name).objectStore(name).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => resolve([]);
+      } catch (_) { resolve([]); }
+    });
+  },
+  put(name, value) { if (this.handle) try { this.handle.transaction(name, "readwrite").objectStore(name).put(value); } catch (_) { /* ignore */ } },
+  del(name, key) { if (this.handle) try { this.handle.transaction(name, "readwrite").objectStore(name).delete(key); } catch (_) { /* ignore */ } },
 };
 
 // ---------------------------------------------------------------------------
-// Files: raw bytes kept in IndexedDB, so Excel/Word/PDF/images survive intact
+// Files: raw bytes, so Excel/Word/PDF/images survive intact. Each chat has its own files.
 // ---------------------------------------------------------------------------
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 
 const files = {
-  map: new Map(),   // path -> { bytes: Uint8Array, mtime }
-  db: null,
-  async init() {
-    try {
-      this.db = await new Promise((resolve, reject) => {
-        const req = indexedDB.open("mini-agent", 1);
-        req.onupgradeneeded = () => req.result.createObjectStore("files", { keyPath: "path" });
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-      });
-      const rows = await new Promise((resolve, reject) => {
-        const req = this.db.transaction("files").objectStore("files").getAll();
-        req.onsuccess = () => resolve(req.result);
-        req.onerror = () => reject(req.error);
-      });
-      for (const r of rows) this.map.set(r.path, { bytes: new Uint8Array(r.bytes), mtime: r.mtime });
-    } catch (_) { this.db = null; /* private mode etc: keep files in memory for this visit */ }
-    const legacy = store.get("ma.files", null);   // text files saved by older versions
-    if (legacy && typeof legacy === "object") {
-      for (const [p, text] of Object.entries(legacy)) if (!this.map.has(p)) this.put(p, enc.encode(String(text)));
-      store.remove("ma.files");
-    }
-  },
-  _tx(fn) {
-    if (!this.db) return;
-    try { fn(this.db.transaction("files", "readwrite").objectStore("files")); } catch (_) { /* ignore */ }
-  },
+  all: new Map(),   // "chatId/path" -> { chat, path, bytes: Uint8Array, mtime }
+  scope: null,      // the open chat's id
+  k(path, chat = this.scope) { return `${chat}/${path}`; },
   put(path, bytes, mtime = Date.now()) {
-    this.map.set(path, { bytes, mtime });
-    this._tx((s) => s.put({ path, bytes: bytes.slice().buffer, mtime }));
+    if (!this.scope) return;
+    const key = this.k(path);
+    this.all.set(key, { chat: this.scope, path, bytes, mtime });
+    db.put("files", { path: key, chat: this.scope, name: path, bytes: bytes.slice().buffer, mtime });
   },
-  remove(path) {
-    this.map.delete(path);
-    this._tx((s) => s.delete(path));
-  },
-  get(path) { return this.map.get(path); },
-  has(path) { return this.map.has(path); },
-  paths() { return [...this.map.keys()].sort(); },
-  snapshot() { return new Map([...this.map].map(([p, f]) => [p, f.mtime])); },
+  remove(path) { const key = this.k(path); this.all.delete(key); db.del("files", key); },
+  get(path) { return this.all.get(this.k(path)); },
+  has(path) { return this.all.has(this.k(path)); },
+  paths(chat = this.scope) { return [...this.all.values()].filter((r) => r.chat === chat).map((r) => r.path).sort(); },
+  snapshot() { return new Map(this.paths().map((p) => [p, this.get(p).mtime])); },
+  removeChat(chat) { for (const [key, r] of this.all) if (r.chat === chat) { this.all.delete(key); db.del("files", key); } },
 };
+
+// ---------------------------------------------------------------------------
+// Chats
+// ---------------------------------------------------------------------------
+function titleFrom(text) {
+  let t = String(text || "").replace(/\s+/g, " ").trim() || "New chat";
+  if (t.length > 48) t = t.slice(0, 47).replace(/\s\S*$/, "") + "…";
+  return t.charAt(0).toUpperCase() + t.slice(1);
+}
+const chats = {
+  list: new Map(),
+  create(firstText) {
+    const id = "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const now = Date.now();
+    const chat = { id, title: titleFrom(firstText), created: now, updated: now, history: [], log: [] };
+    this.list.set(id, chat);
+    return chat;
+  },
+  save(chat, touch = true) {
+    if (touch) chat.updated = Date.now();
+    if (db.handle) db.put("chats", chat);
+    else store.set("ma.chats", [...this.list.values()]);   // fallback when IndexedDB isn't available
+  },
+  remove(id) {
+    this.list.delete(id);
+    files.removeChat(id);
+    if (db.handle) db.del("chats", id); else store.set("ma.chats", [...this.list.values()]);
+  },
+  sorted() { return [...this.list.values()].sort((a, b) => b.updated - a.updated); },
+};
+
+const save = {
+  settings: () => store.set("ma.settings", state.settings),
+  chat: () => {
+    if (!state.chat) return;
+    state.chat.history = state.history;
+    state.chat.log = state.log;
+    chats.save(state.chat);
+  },
+};
+
+// Load chats and files, and bring data from older versions (one chat, files without a chat) along.
+async function loadStorage() {
+  await db.open();
+  const [chatRows, fileRows] = await Promise.all([db.all("chats"), db.all("files")]);
+  for (const c of db.handle ? chatRows : store.get("ma.chats", [])) if (c && c.id) chats.list.set(c.id, c);
+
+  let legacy = null;
+  const oldLog = store.get("ma.log", null);
+  if (Array.isArray(oldLog) && oldLog.length) {
+    const firstUser = oldLog.find((e) => e.kind === "user");
+    legacy = chats.create(firstUser ? firstUser.text : "Earlier chat");
+    legacy.log = oldLog;
+    legacy.history = store.get("ma.history", []) || [];
+    chats.save(legacy);
+  }
+  const owner = () => legacy || (legacy = chats.create("Earlier files"));
+  for (const r of fileRows) {
+    if (r.chat) { files.all.set(r.path, { chat: r.chat, path: r.name, bytes: new Uint8Array(r.bytes), mtime: r.mtime }); continue; }
+    const c = owner();                                   // a file saved before chats existed
+    files.scope = c.id; files.put(r.path, new Uint8Array(r.bytes), r.mtime); db.del("files", r.path);
+  }
+  const oldText = store.get("ma.files", null);
+  if (oldText && typeof oldText === "object") {
+    const c = owner(); files.scope = c.id;
+    for (const [p, text] of Object.entries(oldText)) if (!files.has(p)) files.put(p, enc.encode(String(text)));
+  }
+  if (legacy) { chats.save(legacy, false); store.set("ma.currentChat", legacy.id); }
+  store.remove("ma.log"); store.remove("ma.history"); store.remove("ma.files");
+  files.scope = null;
+  const current = chats.list.get(store.get("ma.currentChat", ""));
+  return current || null;
+}
 
 const sameBytes = (a, b) => {
   if (a.length !== b.length) return false;
@@ -183,11 +270,12 @@ const blobUrls = new Map();
 function fileUrl(path) {
   const f = files.get(path);
   if (!f) return null;
-  const cached = blobUrls.get(path);
+  const key = files.k(path);
+  const cached = blobUrls.get(key);
   if (cached && cached.mtime === f.mtime) return cached.url;
   if (cached) URL.revokeObjectURL(cached.url);
   const url = URL.createObjectURL(new Blob([f.bytes], { type: fileInfo(path).mime }));
-  blobUrls.set(path, { url, mtime: f.mtime });
+  blobUrls.set(key, { url, mtime: f.mtime });
   return url;
 }
 
@@ -483,6 +571,187 @@ function syncFromPython(returned) {
   return { changed, removed };
 }
 
+// ---------------------------------------------------------------------------
+// Screenshots: how the agent checks its work with its own eyes.
+//   web pages  -> Microlink's free screenshot service (about 25 a day without a key)
+//   images     -> used as they are
+//   PDFs       -> page rendered with pdf.js
+//   Word, Excel, CSV, Markdown, HTML, text -> laid out as a page and captured with html-to-image,
+//                 inside a sandboxed frame so nothing in the file can reach this app or your keys
+// The picture is then shown to a vision model, which answers the agent's question about it.
+// ---------------------------------------------------------------------------
+const HTML2IMG_URL = "https://cdn.jsdelivr.net/npm/html-to-image@1.11.13/dist/html-to-image.js";
+// the "legacy" build of pdf.js brings its own polyfills, so it also works on older iPhones and browsers
+const PDFJS_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.min.mjs";
+const PDFJS_WORKER_URL = "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.2.108/legacy/build/pdf.worker.min.mjs";
+const SHOT_MAX_W = 1100;
+const SHOT_MAX_H = 2400;
+
+async function drawable(blob) {
+  try { return await createImageBitmap(blob); } catch (_) {
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.src = url;
+    try { await img.decode(); } finally { setTimeout(() => URL.revokeObjectURL(url), 1000); }
+    return img;
+  }
+}
+// Scale to at most SHOT_MAX_W wide (and cap very tall pages), on white, as a JPEG data URL.
+async function toJpeg(source) {
+  const img = source instanceof Blob ? await drawable(source) : source;
+  const w0 = img.width || img.naturalWidth, h0 = img.height || img.naturalHeight;
+  const scale = Math.min(1, SHOT_MAX_W / w0);
+  const w = Math.max(1, Math.round(w0 * scale));
+  const h = Math.max(1, Math.min(SHOT_MAX_H, Math.round(h0 * scale)));
+  const c = document.createElement("canvas");
+  c.width = w; c.height = h;
+  const g = c.getContext("2d");
+  g.fillStyle = "#fff"; g.fillRect(0, 0, w, h);
+  g.drawImage(img, 0, 0, w0 * scale, h0 * scale);
+  return { src: c.toDataURL("image/jpeg", 0.86), width: w, height: h, cropped: Math.round(h0 * scale) > SHOT_MAX_H };
+}
+
+const escapeHTML = (t) => String(t).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+function pageHTML(inner) {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>
+    html,body{background:#fff;color:#111}
+    body{margin:0;padding:24px 28px;font:17px/1.45 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;display:inline-block;min-width:calc(100% - 56px)}
+    table{border-collapse:collapse} td,th{border:1px solid #bdbdbd;padding:6px 10px;font-size:16px;text-align:left;vertical-align:top}
+    pre{white-space:pre-wrap;font:15px/1.45 ui-monospace,Menlo,Consolas,monospace}
+    img{max-width:100%} .note{color:#555;font-size:14px;margin:0 0 12px}
+  </style></head><body>${inner}</body></html>`;
+}
+
+// Lay out HTML in a hidden sandboxed frame and photograph it.
+function renderHtmlShot(html, width = 1000, fit = false) {
+  return new Promise((resolve, reject) => {
+    const id = "shot" + Math.random().toString(36).slice(2);
+    const frame = document.createElement("iframe");
+    frame.setAttribute("sandbox", "allow-scripts");
+    frame.setAttribute("aria-hidden", "true");
+    frame.tabIndex = -1;
+    // kept inside the viewport (invisible, behind everything): browsers pause rendering in off-screen frames
+    frame.style.cssText = `position:fixed;left:0;top:0;width:${width}px;height:900px;border:0;opacity:0;pointer-events:none;z-index:-1`;
+    const capture = `<script src="${HTML2IMG_URL}"><\/script><script>
+      window.addEventListener("load", () => setTimeout(async () => {
+        try {
+          const root = document.documentElement;
+          const content = document.body ? Math.ceil(document.body.getBoundingClientRect().height) : 0;
+          const h = Math.min(${SHOT_MAX_H}, ${fit} ? Math.max(content, 120) : Math.max(content, root.scrollHeight, 200));
+          const url = await htmlToImage.toJpeg(root, { quality: 0.88, backgroundColor: "#ffffff", width: ${width}, height: h, pixelRatio: 1, skipFonts: true });
+          parent.postMessage({ shot: "${id}", url, w: ${width}, h }, "*");
+        } catch (e) { parent.postMessage({ shot: "${id}", error: String((e && e.message) || e) }, "*"); }
+      }, 450));
+    <\/script>`;
+    const doc = /<\/body>/i.test(html) ? html.replace(/<\/body>(?![\s\S]*<\/body>)/i, capture + "</body>") : html + capture;
+    let timer = 0;
+    const cleanup = () => { clearTimeout(timer); window.removeEventListener("message", onMsg); frame.remove(); };
+    const onMsg = (e) => {
+      if (e.source !== frame.contentWindow || !e.data || e.data.shot !== id) return;
+      cleanup();
+      if (e.data.error) reject(new Error(`couldn't render it (${e.data.error})`));
+      else resolve({ src: e.data.url, width: e.data.w, height: e.data.h });
+    };
+    timer = setTimeout(() => { cleanup(); reject(new Error("it took too long to render")); }, 25000);
+    window.addEventListener("message", onMsg);
+    frame.srcdoc = doc;
+    document.body.append(frame);
+  });
+}
+
+async function pdfShot(bytes, pageNo) {
+  const pdfjs = await import(PDFJS_URL);
+  pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+  const task = pdfjs.getDocument({ data: bytes.slice() });
+  const doc = await task.promise;
+  try {
+    const n = Math.min(Math.max(1, Number(pageNo) || 1), doc.numPages);
+    const page = await doc.getPage(n);
+    const base = page.getViewport({ scale: 1 });
+    const viewport = page.getViewport({ scale: Math.min(2, SHOT_MAX_W / base.width) });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.floor(viewport.width); canvas.height = Math.floor(viewport.height);
+    await page.render({ canvas, canvasContext: canvas.getContext("2d"), viewport }).promise;
+    return { ...(await toJpeg(canvas)), note: `page ${n} of ${doc.numPages}` };
+  } finally { try { await task.destroy(); } catch (_) { /* already closed */ } }
+}
+
+// openpyxl writes formulas without calculated values (Excel works them out on opening),
+// so show the formula itself instead of an empty cell.
+function fillFormulas(ws) {
+  let n = 0;
+  for (const [addr, cell] of Object.entries(ws || {})) {
+    if (addr[0] === "!" || !cell || !cell.f) continue;
+    if (cell.v === undefined || cell.v === null || cell.v === "") { cell.t = "s"; cell.v = "=" + cell.f; delete cell.w; n++; }
+  }
+  return n;
+}
+
+async function fileShot(path, pageNo) {
+  const f = files.get(path);
+  const info = fileInfo(path);
+  if (info.kind === "image") return toJpeg(new Blob([f.bytes], { type: info.mime }));
+  if (info.ext === "pdf") return pdfShot(f.bytes, pageNo);
+  if (info.ext === "pptx") throw new Error("PowerPoint files can't be screenshotted here. Open it with python-pptx and print each slide's text and shapes to check it instead.");
+  if (info.ext === "html" || info.ext === "htm") return renderHtmlShot(dec.decode(f.bytes));
+  let inner;
+  let note = "";
+  if (info.ext === "docx") {
+    await loadScript(MAMMOTH_URL);
+    inner = (await mammoth.convertToHtml({ arrayBuffer: f.bytes.slice().buffer })).value;
+  } else if (info.ext === "xlsx" || info.ext === "xls") {
+    await loadScript(XLSX_URL);
+    const wb = XLSX.read(f.bytes, { type: "array" });
+    const idx = Math.min(Math.max(1, Number(pageNo) || 1), wb.SheetNames.length) - 1;
+    const name = wb.SheetNames[idx];
+    const formulas = fillFormulas(wb.Sheets[name]);
+    note = `sheet "${name}"` + (wb.SheetNames.length > 1 ? ` (${idx + 1} of ${wb.SheetNames.length}: ${wb.SheetNames.join(", ")})` : "") +
+      (formulas ? `; ${formulas} formula cells show their formulas, because Excel calculates them when the file is opened` : "");
+    inner = `<p class="note">${escapeHTML(note)}</p>` + XLSX.utils.sheet_to_html(wb.Sheets[name]);
+  } else if (info.ext === "csv" || info.ext === "tsv") {
+    const rows = parseCSV(dec.decode(f.bytes), info.ext === "tsv" ? "\t" : ",");
+    inner = "<table>" + rows.map((r, i) => "<tr>" + r.map((c) => `<${i ? "td" : "th"}>${escapeHTML(c)}</${i ? "td" : "th"}>`).join("") + "</tr>").join("") + "</table>";
+  } else if (info.ext === "md") {
+    inner = mdHTML(dec.decode(f.bytes));
+  } else if (isTextual(path)) {
+    inner = `<pre>${escapeHTML(dec.decode(f.bytes).slice(0, 20000))}</pre>`;
+  } else {
+    throw new Error(`${info.label} files can't be screenshotted.`);
+  }
+  return { ...(await renderHtmlShot(pageHTML(inner), 820, true)), note };
+}
+
+async function webShot(url) {
+  const api = `https://api.microlink.io/?url=${encodeURIComponent(url)}&screenshot=true&meta=false&embed=screenshot.url`;
+  let res;
+  try { res = await fetch(api); } catch (_) { res = null; }
+  if (res && res.status === 429) throw new Error("the free screenshot service's daily limit (about 25 screenshots) is used up. Try again tomorrow.");
+  if (res && res.ok) {
+    const blob = await res.blob();
+    if (blob.type.startsWith("image/")) return toJpeg(blob);
+  }
+  // the service didn't allow reading the image from this page: let the vision model fetch it directly
+  return { src: api, width: 0, height: 0, remote: true };
+}
+
+// Ask the vision model about a screenshot.
+async function lookAt(shot, question, label, signal) {
+  const ask = `You are the eyes of an AI agent that is checking its own work. This is a screenshot of ${label}.
+
+What to check: ${question || "Describe what is shown and point out anything that looks wrong."}
+
+Answer precisely and concisely. Quote the exact text and numbers you can read. List any problems you see: text cut off or overlapping, unreadable labels, missing or empty parts, wrong or inconsistent values, bad layout. If you can't make something out, say so rather than guessing.`;
+  const data = await callLLM({
+    model: visionModel(),
+    messages: [{ role: "user", content: [{ type: "text", text: ask }, { type: "image_url", image_url: { url: shot.src } }] }],
+    temperature: 0.2,
+    max_tokens: 1500,
+  }, signal);
+  const m = data.choices[0].message || {};
+  const text = String(m.content || "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  return text || String(m.reasoning || "").trim().slice(-1500) || "(The vision model didn't return an answer.)";
+}
+
 const TOOL_FUNCTIONS = {
   async web_search({ query }, ctx) {
     if (!query) throw new Error("query is required");
@@ -523,6 +792,25 @@ const TOOL_FUNCTIONS = {
     const names = files.paths();
     return names.length ? names.map((n) => `${n} (${humanSize(files.get(n).bytes.length)})`).join("\n") : "(no files yet)";
   },
+  async screenshot({ target, question, page }, ctx) {
+    const t = String(target || "").trim();
+    if (!t) throw new Error("target is required: the name of a file you made, or a web page URL");
+    let shot, label;
+    if (/^https?:\/\//i.test(t)) {
+      shot = await webShot(t);
+      label = `the web page ${t}`;
+    } else {
+      const p = cleanPath(t);
+      if (!files.has(p)) throw new Error(`No file called ${p}. Use list_files to see what exists.`);
+      try { shot = await fileShot(p, page); } catch (e) { throw new Error(`Couldn't screenshot ${p}: ${e.message}`); }
+      label = `the file ${p}` + (shot.note ? ` (${shot.note})` : "");
+    }
+    if (ctx.onImage) ctx.onImage(shot.src);
+    if (ctx.onProgress) ctx.onProgress(`Looking closely at ${t.length > 50 ? hostOf(t) : t}`);
+    const seen = await lookAt(shot, question, label, ctx.signal);
+    const size = shot.width ? `${shot.width}×${shot.height}px${shot.cropped ? ", cut off at the bottom because the page is very long" : ""}` : "full page";
+    return `Screenshot of ${label} (${size}).\nWhat the vision model (${visionModel()}) saw:\n${seen}`;
+  },
   async get_current_time() {
     return new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short" }) +
       ` (${Intl.DateTimeFormat().resolvedOptions().timeZone})`;
@@ -547,6 +835,11 @@ const TOOLS = [
     { path: { type: "string" }, content: { type: "string" } }, ["path", "content"]),
   tool("read_file", "Read a text file you made earlier.", { path: { type: "string" } }, ["path"]),
   tool("list_files", "List the files made so far."),
+  tool("screenshot", "Take a screenshot and have a vision model look at it, to check something visually. " +
+    "target: a file you made (chart.png, quote.pdf, report.docx, sheet.xlsx, page.html, data.csv) or a web page URL (https://...). " +
+    "question: exactly what to check, e.g. 'Is the title right, are axis labels readable, is anything cut off?'. " +
+    "page: PDF page or Excel sheet number (default 1). Use it to verify visual files before finishing, and to see what a web page looks like.",
+    { target: { type: "string" }, question: { type: "string" }, page: { type: "integer" } }, ["target", "question"]),
   tool("get_current_time", "Get the user's current local date and time."),
 ];
 
@@ -596,6 +889,11 @@ function describe(name, args, done) {
     case "read_file": return `${done ? "Read" : "Reading"} ${a.path || "a file"}`;
     case "list_files": return done ? "Checked the files" : "Checking the files";
     case "get_current_time": return done ? "Checked the date" : "Checking the date";
+    case "screenshot": {
+      const t = String(a.target || "");
+      const what = /^https?:/i.test(t) ? hostOf(t) : t || "its work";
+      return done ? `Took a screenshot of ${what} and checked it` : `Taking a screenshot of ${what}`;
+    }
     default: return `${done ? "Used" : "Using"} ${name}`;
   }
 }
@@ -639,14 +937,21 @@ function describeForming(name, raw) {
       return p ? `Writing ${p}${c ? ` (${humanSize(enc.encode(c).length)})` : ""}` : "Starting a file";
     }
     case "read_file": { const p = partialField(raw, "path"); return p ? `Opening ${p}` : "Choosing a file to read"; }
+    case "screenshot": {
+      const t = partialField(raw, "target");
+      const q = partialField(raw, "question");
+      if (q) return `Deciding what to check: ${quote(q, 70)}`;
+      return t ? `Getting ready to look at ${/^https?:/i.test(t) ? hostOf(t) : t}` : "Getting ready to take a screenshot";
+    }
     default: return `Preparing ${name.replace(/_/g, " ")}`;
   }
 }
 
 // Which way the loader turns: tools that pull information in run it backwards; tools that make things run it forwards.
-const PULL_TOOLS = new Set(["web_search", "fetch_webpage", "read_file", "list_files", "get_current_time"]);
+const PULL_TOOLS = new Set(["web_search", "fetch_webpage", "read_file", "list_files", "get_current_time", "screenshot"]);
 
 function stepDetail(name, args, result) {
+  if (name === "screenshot") return `Asked: ${args.question || "(no question)"}\n\n${result}`;
   if (name === "run_python") return `${args.code || ""}\n\n— Output —\n${result}`;
   if (name === "calculator") return `${args.expression} = ${result}`;
   if (name === "write_file") return result;
@@ -680,6 +985,12 @@ Making files (the user can preview, download and share them):
 - Python has no internet access. Get any data you need with web_search first, then put it in the code.
 - After making a file, check it (reopen it in Python and print a short summary) before finishing.
 - Files appear to the user automatically, so don't paste their contents into your answer. Name each file and say in a line what's in it.
+
+Checking your work with screenshots:
+- You have a screenshot tool. After you make a chart, PDF, Word, Excel, CSV or HTML file, take a screenshot of it and ask a specific question (is the title right, are labels readable, do the totals match, is anything cut off or empty).
+- If the screenshot shows a problem, fix the file and check it again. Say briefly in your answer what you checked.
+- To see what a web page looks like, screenshot its URL. The free web screenshot service allows about 25 a day, so use it only when looking matters.
+- Don't take screenshots of plain text answers, and don't take more than you need.
 
 When finished, give a clear, concise final answer in Markdown. Briefly say what you checked, and list source URLs if you used the web.`;
 }
@@ -769,12 +1080,14 @@ async function runTurn(text) {
           const name = tc.function.name;
           const args = parseArgs(tc.function.arguments);
           view.running(name, args);
+          let image = null;
           const result = await executeTool(name, tc.function.arguments, {
             signal,
             onProgress: (p) => view.progress(p === "Running Python" ? describe(name, args, false) : p),
+            onImage: (src) => { image = src; view.peek(src); },
           });
           const failed = /^Error/.test(result) || /exit code: 1/.test(result);
-          view.addStep({ icon: name, label: describe(name, args, true) + (failed ? " (hit an error)" : ""), detail: stepDetail(name, args, result) });
+          view.addStep({ icon: name, label: describe(name, args, true) + (failed ? " (hit an error)" : ""), detail: stepDetail(name, args, result), image });
           state.history.push({ role: "tool", tool_call_id: tc.id, content: result });
         }
         continue;
@@ -801,6 +1114,7 @@ async function runTurn(text) {
     state.abort = null;
     setRunningUI(false);
     save.chat();
+    renderChatList();
   }
 }
 
@@ -831,6 +1145,7 @@ const ICONS = {
   read_file: "M6 3h8l4 4v14H6zM14 3v4h4M9 12h6M9 16h6",
   list_files: "M3 6h7l2 2h9v11H3z",
   get_current_time: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM12 7v5l3 2",
+  screenshot: "M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
   chevron: "M9 6l6 6-6 6",
   alert: "M12 4 2.5 20h19ZM12 10v4M12 17h.01",
   share: "M12 3v12M8 7l4-4 4 4M5 12v8h14v-8",
@@ -895,17 +1210,28 @@ const scrollDown = (force) => { if (force || nearBottom()) ui.chat.scrollTop = u
 // It eases between speeds (even through a change of direction) and spins down when done.
 // ---------------------------------------------------------------------------
 const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
+// Each mood sets the spin (direction and base speed), the pulse (shape, depth, beats per second)
+// and the glow colour, picked from the colours in your animation.
+//   breath    = a slow, even swell
+//   inhale    = it draws in (shrinks) on each beat: taking information in
+//   heartbeat = a strong double beat that pushes out: making something
 const LOADER_MOODS = {
-  waiting: { dir: 1, base: 0.35 },
-  thinking: { dir: 1, base: 0.8 },
-  forming: { dir: 1, base: 1.1 },
-  pull: { dir: -1, base: 1.6 },
-  make: { dir: 1, base: 2.0 },
-  answer: { dir: 1, base: 0.9 },
-  done: { dir: 1, base: 0 },
+  waiting: { dir: 1, base: 0.35, shape: "breath", amp: 0.06, hz: 0.55, glow: [70, 140, 255] },
+  thinking: { dir: 1, base: 0.8, shape: "breath", amp: 0.07, hz: 1.05, glow: [150, 110, 255] },
+  forming: { dir: 1, base: 1.1, shape: "breath", amp: 0.07, hz: 1.7, glow: [90, 190, 255] },
+  pull: { dir: -1, base: 1.6, shape: "inhale", amp: 0.12, hz: 1.25, glow: [40, 225, 190] },
+  make: { dir: 1, base: 2.0, shape: "heartbeat", amp: 0.14, hz: 1.1, glow: [255, 80, 190] },
+  answer: { dir: 1, base: 0.9, shape: "breath", amp: 0.05, hz: 0.9, glow: [60, 130, 255] },
+  done: { dir: 1, base: 0, shape: "breath", amp: 0, hz: 0.5, glow: [70, 140, 255] },
+};
+const PULSE_SHAPES = {
+  breath: (p) => (1 - Math.cos(2 * Math.PI * p)) / 2 - 0.35,
+  inhale: (p) => -Math.pow(Math.sin(Math.PI * p), 3),
+  heartbeat: (p) => Math.exp(-(((p - 0.06) / 0.055) ** 2)) + 0.65 * Math.exp(-(((p - 0.3) / 0.06) ** 2)),
 };
 function makeLoader() {
   const img = el("img", { class: "loader", src: reduceMotion ? "assets/loader-still.png" : "assets/loader.webp", alt: "" });
+  const wrap = el("span", { class: "loader-wrap", "aria-hidden": "true" }, img);
   let anim = null;
   if (!reduceMotion && img.animate) {
     anim = img.animate([{ transform: "rotate(0deg)" }, { transform: "rotate(360deg)" }], { duration: 2400, iterations: Infinity });
@@ -914,36 +1240,62 @@ function makeLoader() {
   let mood = LOADER_MOODS.waiting;
   let flow = 0;          // smoothed characters per second arriving from the model
   let steps = 0;
-  let rate = 0.35;
+  let rate = 0.35;       // current spin (negative = counter-clockwise)
+  let phase = 0;         // where we are in the current pulse
+  let amp = mood.amp, hz = mood.hz, shape = mood.shape;
+  let kick = 0;          // extra swell from bursts of text and finished steps
+  let glow = [...mood.glow];
+  let pulseValue = 0;
   let raf = 0;
   let last = performance.now();
+  let stopping = false;
   const tick = (now) => {
     const dt = Math.min(0.1, (now - last) / 1000); last = now;
-    flow *= Math.exp(-dt * 2.5);                                         // speed fades when text stops arriving
-    const boost = Math.min(2.4, Math.log2(1 + flow / 120));             // ~1x extra at 120 chars/s, capped
+    // spin
+    flow *= Math.exp(-dt * 2.5);
+    const boost = Math.min(2.4, Math.log2(1 + flow / 120));
     const target = mood.base === 0 ? 0 : mood.dir * (mood.base + boost) * (1 + Math.min(steps, 8) * 0.06);
-    rate += (target - rate) * Math.min(1, dt * 4);                      // ease, never jump
+    rate += (target - rate) * Math.min(1, dt * 4);
     if (anim) anim.playbackRate = Math.abs(rate) < 0.01 && target === 0 ? 0 : rate;
-    if (target === 0 && Math.abs(rate) < 0.02) { raf = 0; return; }
+    // pulse: ease depth and tempo toward the mood; beats get quicker when text pours in
+    amp += (mood.amp - amp) * Math.min(1, dt * 3);
+    hz += (mood.hz * (1 + Math.min(0.8, boost * 0.25)) - hz) * Math.min(1, dt * 3);
+    if (shape !== mood.shape && (phase % 1) < 0.08) shape = mood.shape;   // change shape on a beat boundary, no jolt
+    phase = (phase + hz * dt) % 1;
+    kick *= Math.exp(-dt * 6);
+    pulseValue = PULSE_SHAPES[shape](phase) * amp;
+    const scale = Math.max(0.82, Math.min(1.4, 1 + pulseValue + kick));
+    for (let i = 0; i < 3; i++) glow[i] += (mood.glow[i] - glow[i]) * Math.min(1, dt * 3);
+    const energy = Math.max(0, pulseValue / Math.max(amp, 0.01)) * 0.6 + Math.min(1, kick * 5);
+    const blur = (2 + 7 * energy).toFixed(1);
+    const alpha = (0.18 + 0.45 * Math.min(1, energy)).toFixed(2);
+    if (!stopping) {
+      wrap.style.transform = `scale(${scale.toFixed(3)})`;
+      wrap.style.filter = `drop-shadow(0 0 ${blur}px rgba(${glow.map((c) => c | 0).join(",")},${alpha}))`;
+    }
+    if (stopping && Math.abs(rate) < 0.02) { raf = 0; return; }
     raf = requestAnimationFrame(tick);
   };
-  const run = () => { if (anim && !raf) { last = performance.now(); raf = requestAnimationFrame(tick); } };
+  const run = () => { if (!reduceMotion && !raf) { last = performance.now(); raf = requestAnimationFrame(tick); } };
   run();
   return {
-    node: img,
+    node: wrap,
     mood(name) { mood = LOADER_MOODS[name] || LOADER_MOODS.thinking; run(); },
-    feed(chars) { flow += chars * 4; run(); },                         // called for every streamed chunk
-    step() { steps++; run(); },
+    feed(chars) { flow += chars * 4; kick = Math.min(0.14, kick + chars / 700); run(); },   // every streamed chunk nudges it
+    step() { steps++; kick = Math.min(0.3, kick + 0.22); run(); },                         // a finished step: a pop
     get direction() { return rate < 0 ? -1 : 1; },
     get rate() { return rate; },
+    get scale() { return 1 + pulseValue + kick; },
     async spinDown() {
-      mood = LOADER_MOODS.done; run();
-      await new Promise((r) => setTimeout(r, reduceMotion ? 0 : 650));
-      img.classList.add("loader-out");
-      await new Promise((r) => setTimeout(r, reduceMotion ? 0 : 280));
+      mood = LOADER_MOODS.done; kick = Math.min(0.3, kick + 0.2); run();               // one last swell...
+      await new Promise((r) => setTimeout(r, reduceMotion ? 0 : 600));
+      stopping = true;
+      wrap.style.transform = "scale(0.4)";                                               // ...then it shrinks away
+      wrap.classList.add("loader-out");
+      await new Promise((r) => setTimeout(r, reduceMotion ? 0 : 300));
       if (raf) cancelAnimationFrame(raf);
       if (anim) anim.cancel();
-      img.remove();
+      wrap.remove();
     },
   };
 }
@@ -1044,16 +1396,21 @@ function makeStreamer(container) {
 // ---------------------------------------------------------------------------
 // Rendering the conversation
 // ---------------------------------------------------------------------------
+function stepRow(s, extraClass = "") {
+  const label = s.label || s.title || "Step";   // `title` = older saved chats
+  const row = el("li", { class: "step" + extraClass });
+  const head = el("span", { class: "step-label" }, icon(s.icon || "note", "ico step-ico"), el("span", {}, label));
+  if (s.detail) row.append(el("details", {}, el("summary", {}, head), el("pre", { class: "step-detail" }, truncate(s.detail, 5000))));
+  else row.append(head);
+  if (s.image) row.append(shotThumb(s.image, label));
+  return row;
+}
+function shotThumb(src, label) {
+  return el("button", { class: "shot-thumb", type: "button", "aria-label": `View screenshot: ${label}`, onclick: () => openImage(src, label) },
+    el("img", { src, alt: "", loading: "lazy" }));
+}
 function stepsList(steps) {
-  return el("ol", { class: "steps" }, ...steps.map((s) => {
-    const label = s.label || s.title || "Step";   // `title` = older saved chats
-    const row = el("li", { class: "step" });
-    const head = el("span", { class: "step-label" }, icon(s.icon || "note", "ico step-ico"), el("span", {}, label));
-    if (s.detail) {
-      row.append(el("details", {}, el("summary", {}, head), el("pre", { class: "step-detail" }, truncate(s.detail, 5000))));
-    } else row.append(head);
-    return row;
-  }));
+  return el("ol", { class: "steps" }, ...steps.map((s) => stepRow(s)));
 }
 
 function activityNode(turn) {
@@ -1147,14 +1504,8 @@ function liveTurn(turn) {
   let thoughtShown = "";
 
   const setStatus = (text, key, hold, force, maxWait) => { ticker.set(text, key, hold, force, maxWait); scrollDown(); };
-  const addStepRow = (s) => {
-    const label = s.label || "Step";
-    const head = el("span", { class: "step-label" }, icon(s.icon || "note", "ico step-ico"), el("span", {}, label));
-    const li = el("li", { class: "step" + (reduceMotion ? "" : " step-in") });
-    if (s.detail) li.append(el("details", {}, el("summary", {}, head), el("pre", { class: "step-detail" }, truncate(s.detail, 5000))));
-    else li.append(head);
-    steps.append(li);
-  };
+  const addStepRow = (s) => steps.append(stepRow(s, reduceMotion ? "" : " step-in"));
+  let peekEl = null;
 
   return {
     waiting(model) {
@@ -1194,13 +1545,21 @@ function liveTurn(turn) {
       setTimeout(() => { streamer.clear(); answerBox.classList.remove("fade-away"); }, 220);
     },
     partialAnswer() { return streamer.text; },
+    peek(src) {                          // show the screenshot under the status line while it's being checked
+      if (peekEl) peekEl.remove();
+      peekEl = el("div", { class: "shot-peek" + (reduceMotion ? "" : " rise-in") }, el("img", { src, alt: "Screenshot being checked" }));
+      live.after(peekEl);
+      scrollDown();
+    },
     addStep(step) {
+      if (peekEl && step.image) { peekEl.remove(); peekEl = null; }
       turn.steps.push(step);
       addStepRow(step);
       loader.step();
       scrollDown();
     },
     async finish() {
+      if (peekEl) { peekEl.remove(); peekEl = null; }
       // 1) let the answer finish flowing in
       if (turn.kind !== "error" && turn.text) {
         streamer.set(turn.text);
@@ -1359,9 +1718,30 @@ async function buildPreview(path, body) {
   const url = fileUrl(path);
   try {
     if (info.kind === "image") { body.replaceChildren(el("img", { class: "preview-img", src: url, alt: path })); return; }
-    if (info.ext === "pdf") {
-      body.replaceChildren(el("iframe", { class: "preview-frame", src: url, title: path }),
-        el("a", { class: "text-btn center", href: url, target: "_blank", rel: "noopener" }, "Open in a new tab"));
+    if (info.ext === "pdf") {          // draw the pages with pdf.js, so it looks the same on every phone and browser
+      body.replaceChildren(el("p", { class: "muted center" }, "Opening PDF…"));
+      const pdfjs = await import(PDFJS_URL);
+      pdfjs.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+      const task = pdfjs.getDocument({ data: f.bytes.slice() });
+      const doc = await task.promise;
+      const pages = el("div", { class: "pdf-pages" });
+      body.replaceChildren(pages);
+      const shown = Math.min(doc.numPages, 30);
+      const width = Math.min(body.clientWidth || 360, 760);
+      for (let n = 1; n <= shown; n++) {
+        if (previewPath !== path || !previewDlg.open) break;          // closed or switched while drawing
+        const page = await doc.getPage(n);
+        const base = page.getViewport({ scale: 1 });
+        const ratio = window.devicePixelRatio || 1;
+        const viewport = page.getViewport({ scale: (width / base.width) * ratio });
+        const canvas = el("canvas", { class: "pdf-page", "aria-label": `Page ${n}` });
+        canvas.width = Math.floor(viewport.width); canvas.height = Math.floor(viewport.height);
+        canvas.style.width = width + "px";
+        pages.append(canvas);
+        await page.render({ canvas, canvasContext: canvas.getContext("2d"), viewport }).promise;
+      }
+      if (doc.numPages > shown) pages.append(el("p", { class: "muted center" }, `Showing the first ${shown} of ${doc.numPages} pages. Download it to see the rest.`));
+      try { await task.destroy(); } catch (_) { /* fine */ }
       return;
     }
     if (info.ext === "csv" || info.ext === "tsv") { body.replaceChildren(tableFrom(parseCSV(dec.decode(f.bytes), info.ext === "tsv" ? "\t" : ","))); return; }
@@ -1376,6 +1756,7 @@ async function buildPreview(path, body) {
       await loadScript(XLSX_URL);
       const wb = XLSX.read(f.bytes, { type: "array" });
       const show = (name) => {
+        fillFormulas(wb.Sheets[name]);
         const html = XLSX.utils.sheet_to_html(wb.Sheets[name], { editable: false });
         const holder = el("div", { class: "table-wrap xls" });
         holder.innerHTML = DOMPurify.sanitize(html);
@@ -1419,8 +1800,22 @@ function openPreview(path) {
   const body = document.getElementById("previewBody");
   body.replaceChildren();
   document.getElementById("shareBtn").hidden = !canShareFile(path);
+  document.getElementById("deleteBtn").hidden = false;
+  delete document.getElementById("downloadBtn").dataset.src;
   previewDlg.showModal();
   buildPreview(path, body);
+}
+// View a screenshot full size (reuses the preview sheet, without the file-only buttons).
+function openImage(src, title) {
+  previewPath = null;
+  document.getElementById("previewTitle").textContent = "Screenshot";
+  document.getElementById("previewSub").textContent = title;
+  document.getElementById("previewBody").replaceChildren(el("img", { class: "preview-img", src, alt: title }));
+  document.getElementById("shareBtn").hidden = true;
+  document.getElementById("deleteBtn").hidden = true;
+  const dl = document.getElementById("downloadBtn");
+  dl.dataset.src = src;
+  previewDlg.showModal();
 }
 function fileObject(path) {
   const f = files.get(path);
@@ -1437,7 +1832,15 @@ document.getElementById("shareBtn").addEventListener("click", async () => {
   try { await navigator.share({ files: [fileObject(previewPath)], title: previewPath }); }
   catch (e) { if (e.name !== "AbortError") downloadFile(previewPath); }
 });
-document.getElementById("downloadBtn").addEventListener("click", () => downloadFile(previewPath));
+document.getElementById("downloadBtn").addEventListener("click", (e) => {
+  const src = e.currentTarget.dataset.src;
+  if (src) {                             // a screenshot
+    const a = el("a", { href: src, download: "screenshot.jpg", target: "_blank", rel: "noopener" });
+    document.body.append(a); a.click(); a.remove();
+    return;
+  }
+  downloadFile(previewPath);
+});
 document.getElementById("deleteBtn").addEventListener("click", () => {
   files.remove(previewPath);
   previewDlg.close();
@@ -1458,6 +1861,12 @@ function submit(text) {
     renderAll(); document.querySelector(".empty input")?.focus(); return;
   }
   ui.input.value = ""; autosize(); updateSendState();
+  if (!state.chat) {                     // a new conversation becomes a saved chat on its first message
+    const chat = chats.create(text);
+    state.chat = chat; state.history = chat.history; state.log = chat.log; files.scope = chat.id;
+    store.set("ma.currentChat", chat.id);
+    chats.save(chat);
+  }
   runTurn(text);
 }
 
@@ -1473,10 +1882,168 @@ ui.input.addEventListener("keydown", (e) => {
 function autosize() { ui.input.style.height = "auto"; ui.input.style.height = Math.min(ui.input.scrollHeight, 168) + "px"; }
 ui.input.addEventListener("input", () => { autosize(); updateSendState(); });
 
-document.getElementById("newChatBtn").addEventListener("click", () => {
-  if (state.running) return;
-  state.history = []; state.log = []; save.chat(); renderAll();
+document.getElementById("newChatBtn").addEventListener("click", () => newChat());
+
+
+// ---------------------------------------------------------------------------
+// Chat history: open, switch, start and delete conversations
+// ---------------------------------------------------------------------------
+function openChat(chat, animate = true) {
+  state.chat = chat;
+  state.history = chat ? chat.history : [];
+  state.log = chat ? chat.log : [];
+  files.scope = chat ? chat.id : null;
+  store.set("ma.currentChat", chat ? chat.id : "");
+  if (animate && !reduceMotion) {
+    ui.thread.classList.remove("thread-in");
+    ui.thread.classList.add("thread-out");
+    setTimeout(() => {
+      renderAll();
+      ui.thread.classList.remove("thread-out");
+      void ui.thread.offsetWidth;
+      ui.thread.classList.add("thread-in");
+    }, 170);
+  } else renderAll();
+  renderChatList();
+}
+
+function newChat() {
+  if (state.running) { flashNote("Finish or stop the current reply first."); return; }
+  closeDrawer();
+  if (!state.chat) { ui.input.focus(); return; }
+  openChat(null);
+  ui.input.focus();
+}
+
+const drawer = document.getElementById("drawer");
+const scrim = document.getElementById("scrim");
+const chatSearch = document.getElementById("chatSearch");
+const chatListEl = document.getElementById("chatList");
+const editBtn = document.getElementById("editChats");
+
+function openDrawer() {
+  renderChatList();
+  drawer.classList.add("open");
+  drawer.removeAttribute("inert");
+  drawer.setAttribute("aria-hidden", "false");
+  scrim.classList.add("show");
+  document.querySelector(".app").classList.add("pushed");
+}
+function closeDrawer() {
+  drawer.classList.remove("open", "editing");
+  drawer.setAttribute("inert", "");
+  drawer.setAttribute("aria-hidden", "true");
+  scrim.classList.remove("show");
+  document.querySelector(".app").classList.remove("pushed");
+  editBtn.textContent = "Edit";
+}
+
+let noteTimer = 0;
+function flashNote(text) {
+  const note = document.getElementById("drawerNote");
+  note.textContent = text;
+  note.classList.add("show");
+  clearTimeout(noteTimer);
+  noteTimer = setTimeout(() => note.classList.remove("show"), 2600);
+  if (!drawer.classList.contains("open")) {           // the drawer is closed, so say it in the status bar instead
+    ui.subtitle.textContent = text;
+    setTimeout(updateSubtitle, 2600);
+  }
+}
+
+const DAY = 86400000;
+function dayGroup(ts) {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (ts >= today) return "Today";
+  if (ts >= today - DAY) return "Yesterday";
+  if (ts >= today - 6 * DAY) return "Previous 7 days";
+  if (ts >= today - 29 * DAY) return "Previous 30 days";
+  return new Date(ts).toLocaleString("en-IN", { month: "long", year: "numeric" });
+}
+function timeLabel(ts) {
+  const d = new Date(ts);
+  const now = new Date();
+  if (d.toDateString() === now.toDateString()) return d.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" });
+  if (now - d < 6 * DAY) return d.toLocaleDateString("en-IN", { weekday: "short" });
+  return d.toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+}
+const plain = (t) => String(t || "").replace(/[*_`#>|[\]()-]+/g, " ").replace(/\s+/g, " ").trim();
+function chatPreview(c) {
+  for (let i = c.log.length - 1; i >= 0; i--) {
+    const e = c.log[i];
+    if (e.kind !== "user" && e.text) return plain(e.text).slice(0, 80);
+    if (e.kind !== "user" && e.files && e.files.length) return `Made ${e.files.join(", ")}`.slice(0, 80);
+  }
+  const n = files.paths(c.id).length;
+  return n ? `${n} file${n === 1 ? "" : "s"}` : "";
+}
+const chatText = (c) => (c.title + " " + c.log.map((e) => e.text || "").join(" ") + " " + files.paths(c.id).join(" ")).toLowerCase();
+
+function renderChatList() {
+  const q = chatSearch.value.trim().toLowerCase();
+  const list = chats.sorted()
+    .filter((c) => c.log.length || files.paths(c.id).length)
+    .filter((c) => !q || chatText(c).includes(q));
+  chatListEl.replaceChildren();
+  if (!list.length) {
+    chatListEl.append(el("p", { class: "list-empty" }, q ? `No chats match “${chatSearch.value.trim()}”.` : "No chats yet. Your conversations will appear here."));
+    return;
+  }
+  let group = null;
+  let cells = null;
+  for (const c of list) {
+    const g = dayGroup(c.updated);
+    if (g !== group) {
+      group = g;
+      chatListEl.append(el("div", { class: "list-head" }, g));
+      cells = el("div", { class: "cells chat-cells" });
+      chatListEl.append(cells);
+    }
+    const active = state.chat && state.chat.id === c.id;
+    const row = el("div", { class: "chat-row" + (active ? " active" : "") });
+    row.append(
+      el("button", { class: "chat-open", type: "button", "aria-current": active ? "true" : null, onclick: () => selectChat(c.id) },
+        el("span", { class: "chat-title" }, c.title),
+        el("span", { class: "chat-sub" }, el("span", { class: "chat-time" }, timeLabel(c.updated)), " ", chatPreview(c))),
+      el("button", { class: "chat-del", type: "button", "aria-label": `Delete “${c.title}”`, onclick: () => deleteChat(c.id, row) }, "Delete"));
+    cells.append(row);
+  }
+}
+
+function selectChat(id) {
+  const chat = chats.list.get(id);
+  if (!chat) return;
+  if (state.chat && state.chat.id === id) { closeDrawer(); return; }
+  if (state.running) { flashNote("Finish or stop the current reply first."); return; }
+  closeDrawer();
+  openChat(chat);
+}
+
+function deleteChat(id, row) {
+  if (state.running && state.chat && state.chat.id === id) { flashNote("Stop the reply before deleting this chat."); return; }
+  const finish = () => {
+    chats.remove(id);
+    if (state.chat && state.chat.id === id) openChat(null);
+    renderChatList();
+  };
+  if (reduceMotion) { finish(); return; }
+  row.style.height = row.offsetHeight + "px";
+  void row.offsetHeight;
+  row.classList.add("row-out");
+  setTimeout(finish, 300);
+}
+
+document.getElementById("menuBtn").addEventListener("click", openDrawer);
+scrim.addEventListener("click", closeDrawer);
+document.getElementById("drawerNew").addEventListener("click", () => newChat());
+document.getElementById("settingsBtn").addEventListener("click", () => { closeDrawer(); openSettings(); });
+chatSearch.addEventListener("input", renderChatList);
+editBtn.addEventListener("click", () => {
+  const on = drawer.classList.toggle("editing");
+  editBtn.textContent = on ? "Done" : "Edit";
 });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drawer.classList.contains("open")) closeDrawer(); });
 
 // ---------------------------------------------------------------------------
 // Settings sheet (edits a draft; Done applies it)
@@ -1485,6 +2052,8 @@ const settingsDlg = document.getElementById("settings");
 const f = {
   key: document.getElementById("keyInput"),
   custom: document.getElementById("customModel"),
+  vision: document.getElementById("visionList"),
+  customVision: document.getElementById("customVision"),
   ask: document.getElementById("askInput"),
   relay: document.getElementById("relayInput"),
   seg: document.getElementById("providerSeg"),
@@ -1494,20 +2063,29 @@ let draft = null;
 
 function stashFields() {
   draft.keys[draft.provider] = f.key.value.trim();
+  for (const [kind, c] of Object.entries(CHOICES)) {
+    const typed = c.other().value.trim();
+    if (typed) draft[kind][draft.provider] = typed;
+  }
 }
-function renderModels() {
+// The main model and the vision model are both a short pick-list plus an "other" field.
+const CHOICES = {
+  models: { list: (P) => P.models, def: (P) => P.defaultModel, box: () => f.models, other: () => f.custom },
+  visionModels: { list: (P) => P.visionModels, def: (P) => P.visionModel, box: () => f.vision, other: () => f.customVision },
+};
+function renderChoices(kind) {
+  const c = CHOICES[kind];
   const P = PROVIDERS[draft.provider];
-  const current = draft.models[draft.provider] || P.defaultModel;
-  const known = P.models.some(([id]) => id === current);
-  const choose = (id) => { draft.models[draft.provider] = id; renderModels(); };
-  f.models.replaceChildren(
-    ...P.models.map(([id, label]) => el("button", { class: "cell cell-choice", type: "button", role: "radio",
-      "aria-checked": String(id === current), onclick: () => choose(id) },
-      el("span", { class: "cell-text" }, el("span", {}, id.split("/").pop()), el("span", { class: "cell-sub" }, label)),
-      el("span", { class: "check", "aria-hidden": "true" }, id === current ? "✓" : ""))),
-  );
-  f.custom.value = known ? "" : current;
+  const current = draft[kind][draft.provider] || c.def(P);
+  const known = c.list(P).some(([id]) => id === current);
+  const choose = (id) => { draft[kind][draft.provider] = id; c.other().value = ""; renderChoices(kind); };
+  c.box().replaceChildren(...c.list(P).map(([id, label]) => el("button", { class: "cell cell-choice", type: "button", role: "radio",
+    "aria-checked": String(id === current), onclick: () => choose(id) },
+    el("span", { class: "cell-text" }, el("span", {}, id.split("/").pop()), el("span", { class: "cell-sub" }, label)),
+    el("span", { class: "check", "aria-hidden": "true" }, id === current ? "✓" : ""))));
+  c.other().value = known ? "" : current;
 }
+function renderModels() { renderChoices("models"); renderChoices("visionModels"); }
 function showProvider(p) {
   draft.provider = p;
   const P = PROVIDERS[p];
@@ -1537,6 +2115,7 @@ function openSettings() {
     provider: state.settings.provider,
     keys: Object.assign({}, state.settings.keys),
     models: Object.assign({}, state.settings.models),
+    visionModels: Object.assign({}, state.settings.visionModels),
   };
   f.key.type = "password";
   document.getElementById("toggleKey").textContent = "Show";
@@ -1549,13 +2128,12 @@ function openSettings() {
 function applySettings() {
   if (!draft) return;
   stashFields();
-  const custom = f.custom.value.trim();
-  if (custom) draft.models[draft.provider] = custom;
   const hadKey = !!apiKey();
   state.settings.provider = draft.provider;
   for (const p of Object.keys(PROVIDERS)) {
     state.settings.keys[p] = draft.keys[p] || "";
     state.settings.models[p] = draft.models[p] || PROVIDERS[p].defaultModel;
+    state.settings.visionModels[p] = draft.visionModels[p] || PROVIDERS[p].visionModel;
   }
   state.settings.askBeforeCode = f.ask.checked;
   state.settings.relayUrl = f.relay.value.trim();
@@ -1565,7 +2143,6 @@ function applySettings() {
   if (hadKey !== !!apiKey() && !state.log.length) renderAll();
 }
 
-document.getElementById("settingsBtn").addEventListener("click", openSettings);
 document.getElementById("titleBtn").addEventListener("click", openSettings);
 document.getElementById("settingsDone").addEventListener("click", () => { applySettings(); settingsDlg.close(); });
 settingsDlg.addEventListener("cancel", () => applySettings());
@@ -1581,10 +2158,12 @@ f.key.addEventListener("input", () => {
     showProvider(p);
   }
 });
-f.custom.addEventListener("input", () => {
-  for (const b of f.models.querySelectorAll(".cell-choice")) { b.setAttribute("aria-checked", "false"); b.querySelector(".check").textContent = ""; }
-  if (!f.custom.value.trim()) renderModels();
-});
+for (const [kind, c] of Object.entries(CHOICES)) {
+  c.other().addEventListener("input", () => {
+    for (const b of c.box().querySelectorAll(".cell-choice")) { b.setAttribute("aria-checked", "false"); b.querySelector(".check").textContent = ""; }
+    if (!c.other().value.trim()) { draft[kind][draft.provider] = ""; renderChoices(kind); }
+  });
+}
 document.getElementById("toggleKey").addEventListener("click", (e) => {
   const show = f.key.type === "password";
   f.key.type = show ? "text" : "password";
@@ -1605,7 +2184,7 @@ document.getElementById("clearFilesBtn").addEventListener("click", () => {
 // ---------------------------------------------------------------------------
 (async () => {
   updateSubtitle();
-  await files.init();
-  renderAll();
+  const current = await loadStorage();
+  openChat(current, false);
   updateSendState();
 })();
