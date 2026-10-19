@@ -48,7 +48,7 @@ Mini Agent has a **screenshot** tool. After it makes a chart, PDF, Word, Excel, 
 
 ## Chat history
 
-Every conversation is saved on your device. Tap the sidebar button (top left) to see them, grouped by day, with search. Tap **Edit** to delete chats. Each chat keeps its own files, and the pencil button (top right) starts a new chat.
+Every conversation is saved on your device. Tap the sidebar button (top left) to see them, grouped by day, with search. **Settings** is at the top of that sidebar, or tap the model name under the title. Tap **Edit** to delete chats. Each chat keeps its own files, and the pencil button (top right) starts a new chat.
 
 ## Files
 
