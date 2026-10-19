@@ -1,13 +1,31 @@
-/* Mini Agent: an agent loop (think -> act -> observe -> check) running in your browser on Groq.
+/* Mini Agent: an agent loop (think -> act -> observe -> check) running in your browser on Groq or OpenRouter.
    Everything here is the "harness". The model only writes text; this file runs the tools. */
 "use strict";
 
 // ---------------------------------------------------------------------------
-// Settings & storage (everything stays in this browser)
+// Providers: where the "brain" lives. Both speak the same OpenAI-style API.
 // ---------------------------------------------------------------------------
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const DEFAULT_MODEL = "openai/gpt-oss-120b";
-const SEARCH_MODEL = "groq/compound-mini";   // Groq model with built-in web search
+const PROVIDERS = {
+  groq: {
+    name: "Groq",
+    url: "https://api.groq.com/openai/v1/chat/completions",
+    keyPrefix: "gsk_",
+    keyLink: "https://console.groq.com/keys",
+    defaultModel: "openai/gpt-oss-120b",
+    searchModel: "groq/compound-mini",          // Groq model with built-in web search
+    models: [["openai/gpt-oss-120b", "Smartest"], ["openai/gpt-oss-20b", "Fastest"], ["qwen/qwen3.8-27b", "Preview"]],
+  },
+  openrouter: {
+    name: "OpenRouter",
+    url: "https://openrouter.ai/api/v1/chat/completions",
+    keyPrefix: "sk-or-",
+    keyLink: "https://openrouter.ai/settings/keys",
+    defaultModel: "openai/gpt-oss-120b",
+    searchModel: "openai/gpt-oss-120b",         // cheap model + OpenRouter's "web" plugin
+    models: [["openai/gpt-oss-120b", "Cheap and capable"], ["anthropic/claude-sonnet-5.5", "Smarter, costs more"]],
+  },
+};
+const GROQ_URL = PROVIDERS.groq.url;
 const MAX_STEPS = 15;
 const MAX_TOOL_OUTPUT = 6000;
 const MAX_HISTORY_CHARS = 60000;
@@ -24,14 +42,49 @@ const store = {
   remove(key) { try { localStorage.removeItem(key); } catch (_) { /* ignore */ } },
 };
 
+function loadSettings() {
+  const saved = store.get("ma.settings", {}) || {};
+  const s = {
+    provider: "groq",
+    keys: { groq: "", openrouter: "" },
+    models: { groq: PROVIDERS.groq.defaultModel, openrouter: PROVIDERS.openrouter.defaultModel },
+    autoRun: false,
+    relayUrl: "",
+  };
+  // settings saved by the first version (one Groq key + one model)
+  if (typeof saved.apiKey === "string") s.keys.groq = saved.apiKey;
+  if (typeof saved.model === "string" && saved.model) s.models.groq = saved.model;
+  if (PROVIDERS[saved.provider]) s.provider = saved.provider;
+  Object.assign(s.keys, saved.keys || {});
+  Object.assign(s.models, saved.models || {});
+  if (typeof saved.autoRun === "boolean") s.autoRun = saved.autoRun;
+  if (typeof saved.relayUrl === "string") s.relayUrl = saved.relayUrl;
+  if (!s.keys[s.provider]) {   // land on whichever provider actually has a key
+    const withKey = Object.keys(PROVIDERS).find((p) => s.keys[p]);
+    if (withKey) s.provider = withKey;
+  }
+  return s;
+}
+
+// Guess the provider from what a key looks like.
+function detectProvider(key) {
+  if (key.startsWith(PROVIDERS.openrouter.keyPrefix)) return "openrouter";
+  if (key.startsWith(PROVIDERS.groq.keyPrefix)) return "groq";
+  return null;
+}
+
 const state = {
-  settings: Object.assign({ apiKey: "", model: DEFAULT_MODEL, autoRun: false, relayUrl: "" }, store.get("ma.settings", {})),
+  settings: loadSettings(),
   history: store.get("ma.history", []),   // what the model sees (without the system prompt)
   log: store.get("ma.log", []),           // what the chat shows
   files: store.get("ma.files", {}),       // the agent's workspace
   running: false,
   abort: null,
 };
+
+const provider = () => PROVIDERS[state.settings.provider];
+const apiKey = () => state.settings.keys[state.settings.provider] || "";
+const currentModel = () => state.settings.models[state.settings.provider] || provider().defaultModel;
 
 const save = {
   settings: () => store.set("ma.settings", state.settings),
@@ -173,35 +226,49 @@ class AgentError extends Error {
 }
 
 function endpoint() {
+  if (state.settings.provider === "openrouter") return PROVIDERS.openrouter.url;   // OpenRouter allows browser calls
   if (state.settings.relayUrl) return state.settings.relayUrl.trim();
   if (location.hostname.endsWith(".vercel.app")) return "/api/chat";   // deployed with the relay
   return GROQ_URL;
 }
 
-async function callGroq(body, signal) {
+async function callLLM(body, signal) {
+  const name = provider().name;
   let res;
   try {
     res = await fetch(endpoint(), {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: "Bearer " + state.settings.apiKey },
+      headers: { "Content-Type": "application/json", Authorization: "Bearer " + apiKey() },
       body: JSON.stringify(body),
       signal,
     });
   } catch (e) {
     if (e.name === "AbortError") throw e;
+    if (state.settings.provider === "openrouter") {
+      throw new AgentError("Couldn't reach OpenRouter. Check your internet connection and try again.", "network");
+    }
     throw new AgentError(
       "Couldn't reach Groq from this page. Either you're offline, or Groq is blocking calls made directly from a browser. " +
-      "Fix: set up the free relay described in the README, then paste its URL in Settings under Relay.", "network");
+      "Fix: switch to an OpenRouter key in Settings, or set up the free relay described in the README.", "network");
   }
   let data = null;
   try { data = await res.json(); } catch (_) { /* non-JSON */ }
-  if (!res.ok) {
-    const err = (data && data.error) || {};
-    const code = err.code || "";
-    if (code === "tool_use_failed") throw new AgentError(err.message || "Malformed tool call", "tool_use_failed");
-    if (res.status === 401) throw new AgentError("Groq rejected the API key. Check it in Settings.", "auth");
-    if (res.status === 429) throw new AgentError("Groq's rate limit was hit. Wait a minute, then try again.", "rate");
-    throw new AgentError(`Groq returned an error (${res.status}): ${err.message || res.statusText}`, code || "http");
+  const err = (data && data.error) || null;
+  if (!res.ok || err) {
+    const e = err || {};
+    const code = typeof e.code === "string" ? e.code : "";
+    const status = res.ok ? Number(e.code) || 500 : res.status;
+    if (code === "tool_use_failed") throw new AgentError(e.message || "Malformed tool call", "tool_use_failed");
+    if (status === 401) throw new AgentError(`${name} rejected the API key. Check it in Settings.`, "auth");
+    if (status === 402) throw new AgentError(`Your ${name} account is out of credits. Top up, or pick a cheaper model in Settings.`, "credits");
+    if (status === 429) throw new AgentError(`${name}'s rate limit was hit. Wait a minute, then try again.`, "rate");
+    if (status === 404 && /model/i.test(e.message || "")) {
+      throw new AgentError(`${name} doesn't recognise the model "${body.model}", or it can't use tools. Pick another model in Settings.`, "model");
+    }
+    throw new AgentError(`${name} returned an error (${status}): ${e.message || res.statusText}`, code || "http");
+  }
+  if (!data || !Array.isArray(data.choices) || !data.choices[0]) {
+    throw new AgentError(`${name} sent back an empty reply. Try again.`, "empty");
   }
   return data;
 }
@@ -220,14 +287,24 @@ function cleanPath(p) {
   return parts.join("/");
 }
 
-async function askCompound(prompt, signal) {
-  const data = await callGroq({ model: SEARCH_MODEL, messages: [{ role: "user", content: prompt }] }, signal);
+// Web access: Groq uses its "compound" model (search built in); OpenRouter uses its "web" plugin.
+async function askWeb(prompt, signal, domain) {
+  const body = { model: provider().searchModel, messages: [{ role: "user", content: prompt }] };
+  if (state.settings.provider === "openrouter") {
+    const plugin = { id: "web", max_results: 5 };
+    if (domain) plugin.include_domains = [domain];
+    body.plugins = [plugin];
+  }
+  const data = await callLLM(body, signal);
   const msg = data.choices[0].message;
   let text = msg.content || "";
   const urls = new Set();
-  for (const t of msg.executed_tools || []) {
+  for (const t of msg.executed_tools || []) {             // Groq
     const results = (t.search_results && t.search_results.results) || [];
     for (const r of results) if (r.url) urls.add(r.url);
+  }
+  for (const a of msg.annotations || []) {                // OpenRouter
+    if (a.type === "url_citation" && a.url_citation && a.url_citation.url) urls.add(a.url_citation.url);
   }
   if (urls.size) text += "\n\nSources:\n" + [...urls].slice(0, 8).map((u) => "- " + u).join("\n");
   return text || "No results.";
@@ -341,11 +418,13 @@ function approveCode(code) {
 const TOOL_FUNCTIONS = {
   async web_search({ query }, signal) {
     if (!query) throw new Error("query is required");
-    return askCompound(`Search the web and answer concisely and factually. Include specific numbers and dates, and list the source URLs you used.\n\nQuery: ${query}`, signal);
+    return askWeb(`Search the web and answer concisely and factually. Include specific numbers and dates, and list the source URLs you used.\n\nQuery: ${query}`, signal);
   },
   async fetch_webpage({ url }, signal) {
-    if (!/^https?:\/\//i.test(url || "")) throw new Error("Give a full URL starting with http:// or https://");
-    return askCompound(`Visit this exact page and report its main content in detail: key facts, numbers, names and dates. Don't add anything that isn't on the page.\n\nURL: ${url}`, signal);
+    let host;
+    try { host = new URL(url).hostname; } catch (_) { host = ""; }
+    if (!/^https?:\/\//i.test(url || "") || !host) throw new Error("Give a full URL starting with http:// or https://");
+    return askWeb(`Visit this exact page and report its main content in detail: key facts, numbers, names and dates. Don't add anything that isn't on the page.\n\nURL: ${url}`, signal, host);
   },
   async calculator({ expression }) { return calculate(expression); },
   async run_python({ code }) {
@@ -479,8 +558,8 @@ async function runTurn(text) {
       blob.set("thinking");
       let data;
       try {
-        data = await callGroq({
-          model: state.settings.model || DEFAULT_MODEL,
+        data = await callLLM({
+          model: currentModel(),
           messages: [{ role: "system", content: systemPrompt() }, ...state.history],
           tools: TOOLS, tool_choice: "auto", temperature: 0.3,
         }, signal);
@@ -661,20 +740,32 @@ const EXAMPLES = [
 
 function renderWelcome() {
   const card = el("section", { class: "welcome" });
-  if (!state.settings.apiKey) {
-    const input = el("input", { type: "password", placeholder: "gsk_...", "aria-label": "Groq API key", spellcheck: "false", autocapitalize: "off" });
+  if (!apiKey()) {
+    const input = el("input", { type: "password", placeholder: "gsk_... or sk-or-...", "aria-label": "Groq or OpenRouter API key", spellcheck: "false", autocapitalize: "off" });
+    const error = el("p", { class: "field-error", role: "alert" });
     const saveKey = () => {
       const v = input.value.trim();
-      if (!v) { input.focus(); return; }
-      state.settings.apiKey = v; save.settings(); renderAll(); ui.input.focus();
+      if (!v) { error.textContent = "Paste a key first."; input.focus(); return; }
+      const p = detectProvider(v);
+      if (!p) {
+        error.textContent = "That doesn't look like a Groq key (gsk_...) or an OpenRouter key (sk-or-...). For anything else, use Settings.";
+        input.focus();
+        return;
+      }
+      state.settings.provider = p;
+      state.settings.keys[p] = v;
+      save.settings(); renderAll(); ui.input.focus();
+      blob.say(`${PROVIDERS[p].name} key accepted. Brain online.`);
     };
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveKey(); } });
+    input.addEventListener("input", () => { error.textContent = ""; });
+    const link = (p, text) => el("a", { href: PROVIDERS[p].keyLink, target: "_blank", rel: "noopener" }, text);
     card.append(
-      el("h2", {}, "Feed me a Groq key"),
-      el("p", {}, "I'm a blob with tools: web search, a calculator, Python and a notepad. I need a Groq API key to think."),
+      el("h2", {}, "Feed me an API key"),
+      el("p", {}, "I'm a blob with tools: web search, a calculator, Python and a notepad. Give me a Groq or OpenRouter key and I'll figure out which it is."),
       el("div", { class: "key-row" }, input, el("button", { class: "primary", type: "button", onclick: saveKey }, "Save key")),
-      el("small", {}, "Your key stays in this browser. ",
-        el("a", { href: "https://console.groq.com/keys", target: "_blank", rel: "noopener" }, "Get a free key")));
+      error,
+      el("small", {}, "Your key stays in this browser. Get one from ", link("groq", "Groq"), " (free tier) or ", link("openrouter", "OpenRouter"), "."));
   } else {
     card.append(
       el("h2", {}, "Give me a job"),
@@ -720,7 +811,10 @@ function setRunningUI(running) {
 function submit(text) {
   text = (text || "").trim();
   if (!text || state.running) return;
-  if (!state.settings.apiKey) { renderAll(); document.querySelector(".welcome input")?.focus(); return; }
+  if (!apiKey()) {
+    if (state.log.length) { document.getElementById("settingsBtn").click(); return; }
+    renderAll(); document.querySelector(".welcome input")?.focus(); return;
+  }
   ui.input.value = ""; autosize();
   runTurn(text);
 }
@@ -748,14 +842,57 @@ const settingsDlg = document.getElementById("settings");
 const f = {
   key: document.getElementById("keyInput"), model: document.getElementById("modelInput"),
   autoRun: document.getElementById("autoRunInput"), relay: document.getElementById("relayInput"),
+  radios: [...document.querySelectorAll('input[name="provider"]')],
 };
+// The sheet edits a draft, so switching providers back and forth never loses what you typed.
+let draft = null;
+const checkedProvider = () => (f.radios.find((r) => r.checked) || {}).value || "groq";
+
+function stashFields() {
+  draft.keys[draft.provider] = f.key.value.trim();
+  draft.models[draft.provider] = f.model.value.trim();
+}
+function showProvider(p) {
+  draft.provider = p;
+  const P = PROVIDERS[p];
+  f.radios.forEach((r) => { r.checked = r.value === p; });
+  f.key.value = draft.keys[p] || "";
+  f.key.placeholder = P.keyPrefix + "...";
+  f.model.value = draft.models[p] || P.defaultModel;
+  document.getElementById("keyLabel").textContent = `${P.name} API key`;
+  document.getElementById("keyDest").textContent = P.name;
+  document.getElementById("modelHint").textContent = P.name;
+  const link = document.getElementById("keyLink");
+  link.href = P.keyLink;
+  document.getElementById("models").replaceChildren(...P.models.map(([id, label]) => el("option", { value: id }, label)));
+  document.getElementById("relaySection").hidden = p !== "groq";
+}
+
 document.getElementById("settingsBtn").addEventListener("click", () => {
-  f.key.value = state.settings.apiKey; f.key.type = "password";
+  draft = {
+    provider: state.settings.provider,
+    keys: Object.assign({}, state.settings.keys),
+    models: Object.assign({}, state.settings.models),
+  };
+  f.key.type = "password";
   document.getElementById("toggleKey").textContent = "Show";
-  f.model.value = state.settings.model; f.autoRun.checked = state.settings.autoRun; f.relay.value = state.settings.relayUrl;
+  showProvider(draft.provider);
+  f.autoRun.checked = state.settings.autoRun;
+  f.relay.value = state.settings.relayUrl;
   renderFiles();
   settingsDlg.returnValue = "";
   settingsDlg.showModal();
+});
+f.radios.forEach((r) => r.addEventListener("change", () => { stashFields(); showProvider(checkedProvider()); }));
+f.key.addEventListener("input", () => {   // pasted the other provider's key? switch to it
+  const v = f.key.value.trim();
+  const p = detectProvider(v);
+  if (p && p !== draft.provider) {
+    f.key.value = draft.keys[draft.provider] || "";
+    stashFields();
+    draft.keys[p] = v;
+    showProvider(p);
+  }
 });
 document.getElementById("toggleKey").addEventListener("click", (e) => {
   const show = f.key.type === "password";
@@ -763,18 +900,25 @@ document.getElementById("toggleKey").addEventListener("click", (e) => {
   e.currentTarget.textContent = show ? "Hide" : "Show";
 });
 document.getElementById("forgetKey").addEventListener("click", () => {
-  state.settings.apiKey = ""; f.key.value = ""; save.settings(); settingsDlg.close(); renderAll();
+  const p = draft ? draft.provider : state.settings.provider;
+  state.settings.keys[p] = "";
+  save.settings(); settingsDlg.close(); renderAll();
+  blob.say(`Forgot your ${PROVIDERS[p].name} key. Poof.`);
 });
 settingsDlg.addEventListener("close", () => {
-  if (settingsDlg.returnValue !== "save") return;
-  const hadKey = !!state.settings.apiKey;
-  state.settings.apiKey = f.key.value.trim();
-  state.settings.model = f.model.value.trim() || DEFAULT_MODEL;
+  if (settingsDlg.returnValue !== "save" || !draft) return;
+  stashFields();
+  const hadKey = !!apiKey();
+  state.settings.provider = draft.provider;
+  for (const p of Object.keys(PROVIDERS)) {
+    state.settings.keys[p] = draft.keys[p] || "";
+    state.settings.models[p] = draft.models[p] || PROVIDERS[p].defaultModel;
+  }
   state.settings.autoRun = f.autoRun.checked;
   state.settings.relayUrl = f.relay.value.trim();
   save.settings();
-  if (hadKey !== !!state.settings.apiKey && !state.log.length) renderAll();
-  blob.say(state.settings.apiKey ? "Settings saved. I feel brand new." : "No key, no thoughts.");
+  if (hadKey !== !!apiKey() && !state.log.length) renderAll();
+  blob.say(apiKey() ? `Running on ${provider().name}. I feel brand new.` : "No key, no thoughts.");
 });
 settingsDlg.addEventListener("click", (e) => { if (e.target === settingsDlg) settingsDlg.close(); });
 

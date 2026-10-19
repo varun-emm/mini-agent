@@ -1,4 +1,4 @@
-// Optional relay for Vercel. Only needed if Groq blocks calls made straight from the browser.
+// Optional relay for Vercel. Only needed if Groq blocks calls made straight from the browser (OpenRouter never needs it).
 // It forwards the caller's OWN key to Groq and stores nothing. No key lives on this server.
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 

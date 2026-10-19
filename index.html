@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Mini Agent</title>
-  <meta name="description" content="A tiny agent with tools, running on Groq, supervised by a blob.">
+  <meta name="description" content="A tiny agent with tools, running on Groq or OpenRouter, supervised by a blob.">
   <meta name="theme-color" content="#DCE6D2" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#1C1930" media="(prefers-color-scheme: dark)">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 8C78 8 94 28 94 54C94 82 76 94 50 94C24 94 6 82 6 54C6 28 22 8 50 8Z' fill='%23FF8FB1' stroke='%2326213F' stroke-width='6'/%3E%3Ccircle cx='36' cy='50' r='11' fill='white' stroke='%2326213F' stroke-width='4'/%3E%3Ccircle cx='64' cy='50' r='11' fill='white' stroke='%2326213F' stroke-width='4'/%3E%3Ccircle cx='39' cy='52' r='5' fill='%2326213F'/%3E%3Ccircle cx='61' cy='47' r='5' fill='%2326213F'/%3E%3C/svg%3E">
@@ -98,24 +98,26 @@
         </button>
       </div>
 
+      <fieldset class="seg">
+        <legend>Provider</legend>
+        <label><input type="radio" name="provider" value="groq"><span>Groq</span></label>
+        <label><input type="radio" name="provider" value="openrouter"><span>OpenRouter</span></label>
+      </fieldset>
+
       <label class="field">
-        <span>Groq API key</span>
+        <span id="keyLabel">Groq API key</span>
         <span class="key-row">
           <input id="keyInput" type="password" placeholder="gsk_..." spellcheck="false" autocapitalize="off">
           <button type="button" class="ghost" id="toggleKey">Show</button>
         </span>
-        <small>Saved only in this browser. It is never sent anywhere except Groq (or your own relay). <a href="https://console.groq.com/keys" target="_blank" rel="noopener">Get a key</a></small>
+        <small>Saved only in this browser, and only ever sent to <span id="keyDest">Groq</span>. <a id="keyLink" href="https://console.groq.com/keys" target="_blank" rel="noopener">Get a key</a></small>
       </label>
 
       <label class="field">
         <span>Model</span>
         <input id="modelInput" list="models" spellcheck="false" autocapitalize="off">
-        <datalist id="models">
-          <option value="openai/gpt-oss-120b">Smartest</option>
-          <option value="openai/gpt-oss-20b">Fastest</option>
-          <option value="qwen/qwen3.8-27b">Preview</option>
-        </datalist>
-        <small>The brain. The default works well. Swap it for any Groq model ID.</small>
+        <datalist id="models"></datalist>
+        <small>The brain. Pick a suggestion, or type any <span id="modelHint">Groq</span> model ID that supports tools.</small>
       </label>
 
       <label class="check">
@@ -123,12 +125,12 @@
         <span>Run Python without asking me first</span>
       </label>
 
-      <details class="advanced">
-        <summary>Relay (only if direct calls fail)</summary>
+      <details class="advanced" id="relaySection">
+        <summary>Groq relay (only if direct calls fail)</summary>
         <label class="field">
           <span>Relay URL</span>
           <input id="relayInput" type="url" placeholder="https://your-app.vercel.app/api/chat" spellcheck="false" autocapitalize="off">
-          <small>Leave empty to call Groq directly. See the README for the free one-click relay.</small>
+          <small>Leave empty to call Groq directly. OpenRouter never needs this. See the README for the free relay.</small>
         </label>
       </details>
 

@@ -377,6 +377,21 @@ a { color: var(--marker); }
   background: var(--surface);
   font-size: 16px;
 }
+.seg { border: 0; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px; }
+.seg legend { font-weight: 700; padding: 0; margin-bottom: 6px; width: 100%; }
+.seg label { cursor: pointer; }
+.seg input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.seg span {
+  display: inline-block;
+  padding: 8px 16px;
+  border: 2px solid var(--ink);
+  border-radius: 999px;
+  background: var(--surface);
+  font: 700 .95rem/1 var(--display);
+}
+.seg input:checked + span { background: var(--marker); color: var(--on-marker); box-shadow: 2px 2px 0 var(--ink); }
+.seg input:focus-visible + span { outline: 3px solid var(--marker); outline-offset: 2px; }
+.field-error { color: var(--danger); font-size: .88rem; margin: 6px 0 0; }
 .key-row { display: flex; gap: 8px; }
 .key-row input { flex: 1; min-width: 0; }
 .check { display: flex; gap: 10px; align-items: center; cursor: pointer; }
