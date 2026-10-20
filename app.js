@@ -4,7 +4,7 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "2.5.0";
+const APP_VERSION = "2.6.0";
 
 // ---------------------------------------------------------------------------
 // Providers: where the "brain" lives. Both speak the same OpenAI-style API.
@@ -61,6 +61,7 @@ function loadSettings() {
     visionModels: { groq: PROVIDERS.groq.visionModel, openrouter: PROVIDERS.openrouter.visionModel },
     askBeforeCode: false,
     relayUrl: "",
+    debate: false,       // the other provider reviews each answer and they debate until they agree
   };
   if (typeof saved.apiKey === "string") s.keys.groq = saved.apiKey;            // first version
   if (typeof saved.model === "string" && saved.model) s.models.groq = saved.model;
@@ -70,6 +71,7 @@ function loadSettings() {
   Object.assign(s.visionModels, saved.visionModels || {});
   if (typeof saved.askBeforeCode === "boolean") s.askBeforeCode = saved.askBeforeCode;
   if (typeof saved.relayUrl === "string") s.relayUrl = saved.relayUrl;
+  if (typeof saved.debate === "boolean") s.debate = saved.debate;
   if (!s.keys[s.provider]) {
     const withKey = Object.keys(PROVIDERS).find((p) => s.keys[p]);
     if (withKey) s.provider = withKey;
@@ -90,12 +92,16 @@ const state = {
   log: [],             // what the chat shows
   running: false,
   abort: null,
+  speaker: null,       // during a debate, the provider that's talking right now (null = the one picked in Settings)
 };
 
-const provider = () => PROVIDERS[state.settings.provider];
-const apiKey = () => state.settings.keys[state.settings.provider] || "";
-const currentModel = () => state.settings.models[state.settings.provider] || provider().defaultModel;
-const visionModel = () => state.settings.visionModels[state.settings.provider] || provider().visionModel;
+const activeId = () => state.speaker || state.settings.provider;
+const provider = () => PROVIDERS[activeId()];
+const apiKey = () => state.settings.keys[activeId()] || "";
+const currentModel = () => state.settings.models[activeId()] || provider().defaultModel;
+const visionModel = () => state.settings.visionModels[activeId()] || provider().visionModel;
+const otherProvider = () => Object.keys(PROVIDERS).find((p) => p !== state.settings.provider);
+const debateReady = () => state.settings.debate && !!state.settings.keys[otherProvider()] && !!state.settings.keys[state.settings.provider];
 
 // ---------------------------------------------------------------------------
 // IndexedDB: chats and file bytes live here, on this device only
@@ -291,7 +297,7 @@ class AgentError extends Error {
 }
 
 function endpoint() {
-  if (state.settings.provider === "openrouter") return PROVIDERS.openrouter.url;
+  if (activeId() === "openrouter") return PROVIDERS.openrouter.url;
   if (state.settings.relayUrl) return state.settings.relayUrl.trim();
   if (location.hostname.endsWith(".vercel.app")) return "/api/chat";
   return PROVIDERS.groq.url;
@@ -307,7 +313,7 @@ async function postLLM(body, signal) {
     });
   } catch (e) {
     if (e.name === "AbortError") throw e;
-    if (state.settings.provider === "openrouter") {
+    if (activeId() === "openrouter") {
       throw new AgentError("Couldn't reach OpenRouter. Check your internet connection and try again.", "network");
     }
     throw new AgentError("Couldn't reach Groq. You may be offline, or Groq may be blocking calls from web pages. " +
@@ -459,7 +465,7 @@ function cleanPath(p) {
 
 async function askWeb(prompt, signal, domain) {
   const body = { model: provider().searchModel, messages: [{ role: "user", content: prompt }] };
-  if (state.settings.provider === "openrouter") {
+  if (activeId() === "openrouter") {
     const plugin = { id: "web", max_results: 5 };
     if (domain) plugin.include_domains = [domain];
     body.plugins = [plugin];
@@ -1039,9 +1045,218 @@ function trimHistory() {
 // ---------------------------------------------------------------------------
 // THE AGENT LOOP
 // ---------------------------------------------------------------------------
+// One agent working until it has an answer: think, use tools, look at the results, repeat.
+// msgs is the conversation it sees (it adds its own tool calls and final answer to it).
+// opts: system prompt, tools it may use, quiet (don't show its text as the answer yet: a draft
+// during a debate), who (name shown on its steps when two AIs are working).
+// Returns its final text, or null if it ran out of steps.
+async function agentLoop(msgs, view, signal, opts) {
+  const { system, tools = TOOLS, quiet = false, who = "" } = opts;
+  const tag = (label) => (who ? `${who}: ${label}` : label);
+  let badCalls = 0;
+  for (let step = 1; step <= MAX_STEPS; step++) {
+    // THINK (streamed, so the status can show what's actually going on)
+    const thinkStart = Date.now();
+    view.waiting(currentModel());
+    let msg;
+    try {
+      msg = await streamLLM({
+        model: currentModel(),
+        messages: [{ role: "system", content: system }, ...msgs],
+        tools, tool_choice: "auto", temperature: 0.3,
+      }, signal, {
+        reasoning: (chunk, all) => view.thinking(all, chunk.length),
+        content: (chunk, all) => (quiet ? view.drafting(chunk.length) : view.answer(all, chunk.length)),
+        tool: (call) => view.forming(call.function.name, call.function.arguments),
+      });
+    } catch (e) {
+      if (e.code === "tool_use_failed" && badCalls < 2) {
+        badCalls++;
+        if (!quiet) view.dropAnswer();
+        view.addStep({ icon: "retry", label: tag("Retried a tool call that came out garbled"), detail: e.message });
+        msgs.push({ role: "user", content: "[harness note] Your last tool call was malformed and was not run. Retry with valid JSON arguments that match the tool's schema." });
+        continue;
+      }
+      throw e;
+    }
+
+    if (msg.reasoning) {
+      view.addStep({ icon: "think", label: tag(`Thought for ${fmtDuration(Date.now() - thinkStart)}`), detail: msg.reasoning });
+    }
+
+    // ACT + OBSERVE
+    if (msg.tool_calls && msg.tool_calls.length) {
+      if (msg.content) {   // a note to itself before using a tool, not the final answer
+        if (!quiet) view.dropAnswer();
+        view.addStep({ icon: "note", label: tag(thoughtSnippet(msg.content, 70) || "Planned the next step"), detail: msg.content });
+      }
+      msgs.push({
+        role: "assistant",
+        content: msg.content || null,
+        tool_calls: msg.tool_calls.map((tc) => ({
+          id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments },
+        })),
+      });
+      const allowed = new Set(tools.map((t) => t.function.name));
+      for (const tc of msg.tool_calls) {
+        const name = tc.function.name;
+        const args = parseArgs(tc.function.arguments);
+        view.running(name, args);
+        let image = null;
+        const result = allowed.has(name)
+          ? await executeTool(name, tc.function.arguments, {
+            signal,
+            onProgress: (p) => view.progress(p === "Running Python" ? describe(name, args, false) : p),
+            onImage: (src) => { image = src; view.peek(src); },
+          })
+          : `Error: you can't use ${name} here. Available: ${[...allowed].join(", ")}`;
+        const failed = /^Error/.test(result) || /exit code: 1/.test(result);
+        view.addStep({ icon: name, label: tag(describe(name, args, true) + (failed ? " (hit an error)" : "")), detail: stepDetail(name, args, result), image });
+        msgs.push({ role: "tool", tool_call_id: tc.id, content: result });
+      }
+      continue;
+    }
+
+    // CHECK -> DONE
+    msgs.push({ role: "assistant", content: msg.content || "" });
+    return msg.content || "";
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// DEBATE: the provider picked in Settings (the lead) does the work; the other one reviews it.
+// They go back and forth until the reviewer agrees, up to DEBATE_ROUNDS reviews.
+// ---------------------------------------------------------------------------
+const DEBATE_ROUNDS = 3;
+const REVIEW_TOOL_NAMES = new Set(["web_search", "fetch_webpage", "calculator", "read_file", "list_files", "screenshot", "get_current_time"]);
+const REVIEW_TOOLS = TOOLS.filter((t) => REVIEW_TOOL_NAMES.has(t.function.name));
+
+function reviewerPrompt(lead, leadModel) {
+  const now = new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short" });
+  return `You are the reviewer in Mini Agent, a chat app where two AIs work on each request together. Another AI (${lead}, model ${leadModel}) did the work and wrote a draft answer for the user. You and it debate until you agree, then the user gets the answer.
+
+Current date and time: ${now}.
+
+Your job: catch what would make the answer wrong or worse for the user.
+- Factual errors, outdated information, wrong numbers or maths, things the user asked for that are missing, problems in the files it made, misleading or unclear wording.
+- Verify the claims that matter with your tools instead of trusting the draft: web_search and fetch_webpage for facts, calculator for maths, screenshot or read_file to look at the files it made. You can't change files yourself.
+- Raise only points that materially improve the answer. Don't nitpick style or wording preferences. If the draft is good, agree.
+- If the other AI pushes back on one of your points with a good reason, accept it.
+
+Reply in exactly this format:
+VERDICT: AGREE
+or
+VERDICT: CHANGES
+For AGREE, add one or two sentences on what you checked. For CHANGES, add a numbered list of the specific points still open: what is wrong, your evidence, what to do. Under 200 words.`;
+}
+
+// What the lead did this turn (tool calls and what came back), so the reviewer can judge the evidence.
+function workSummary(msgs, max = 9000) {
+  const lines = [];
+  for (const m of msgs) {
+    if (m.role === "assistant" && m.tool_calls) {
+      for (const tc of m.tool_calls) lines.push(`-> ${tc.function.name}(${truncate(tc.function.arguments || "", 700)})`);
+    } else if (m.role === "tool") lines.push(`<- ${truncate(m.content || "", 900)}`);
+  }
+  const text = lines.join("\n");
+  return text ? truncate(text, max) : "(It answered without using any tools.)";
+}
+
+function splitReply(text) {
+  const m = String(text || "").match(/<reply>([\s\S]*?)<\/reply>/i);
+  if (!m) return { reply: "", answer: String(text || "").trim() };
+  return { reply: m[1].trim(), answer: String(text).replace(m[0], "").trim() };
+}
+
+function readVerdict(review) {
+  const v = (String(review).match(/VERDICT:\s*\**\s*(AGREE|CHANGES)/i) || [])[1];
+  const body = String(review).replace(/^.*VERDICT:.*$/im, "").trim();
+  const agreed = v ? v.toUpperCase() === "AGREE" : !/^\s*\d+[.)]\s/m.test(body);   // no verdict: a list of points means changes
+  const points = (body.match(/^\s*\d+[.)]\s/gm) || []).length;
+  return { agreed, body: body || String(review).trim(), points };
+}
+
+async function debate({ question, draft, turnStart, madeFiles, view, signal }) {
+  const leadId = state.settings.provider, revId = otherProvider();
+  const L = PROVIDERS[leadId].name, R = PROVIDERS[revId].name;
+  const short = (m) => m.split("/").pop();
+  const leadModel = currentModel();
+  const revModel = state.settings.models[revId] || PROVIDERS[revId].defaultModel;
+  const earlier = state.history.slice(0, turnStart - 1)
+    .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content && !m.tool_calls)
+    .slice(-4).map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${truncate(m.content, 1200)}`).join("\n\n");
+  const revMsgs = [{ role: "user", content:
+    (earlier ? `Earlier in this chat:\n${earlier}\n\n` : "") +
+    `The user's request:\n${question}\n\n` +
+    `What ${L} did (tool calls and results):\n${workSummary(state.history.slice(turnStart))}\n\n` +
+    (madeFiles.length ? `Files it made (you can screenshot or read them): ${madeFiles.join(", ")}\n\n` : "") +
+    `${L}'s draft answer:\n"""\n${draft}\n"""\n\nReview it.` }];
+  const leadMsgs = state.history.slice();
+  let current = draft;
+  const result = { text: draft, rounds: 0, agreed: false, with: R };
+
+  for (let round = 1; round <= DEBATE_ROUNDS; round++) {
+    // the reviewer checks the current answer
+    view.speaker(R);
+    view.progress(round === 1 ? `${R} is reviewing ${L}'s answer` : `${R} is checking ${L}'s changes`);
+    let review;
+    state.speaker = revId;
+    try {
+      review = await agentLoop(revMsgs, view, signal, { system: reviewerPrompt(L, short(leadModel)), tools: REVIEW_TOOLS, quiet: true, who: R });
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      view.addStep({ icon: "alert", label: `Couldn't get ${R}'s review, so ${L}'s answer stands`, detail: e.message });
+      break;
+    } finally { state.speaker = null; }
+    if (review === null) break;
+    result.rounds = round;
+    const v = readVerdict(review);
+    if (v.agreed) {
+      view.addStep({ icon: "debate", label: `${R} agreed${round > 1 ? ` after ${round} rounds` : ""}`, detail: v.body });
+      result.agreed = true;
+      break;
+    }
+    view.addStep({ icon: "debate", label: `${R} pushed back${v.points ? ` on ${v.points} point${v.points === 1 ? "" : "s"}` : ""}`, detail: v.body });
+
+    // the lead weighs the points, fixes what's right, and answers again
+    const last = round === DEBATE_ROUNDS;
+    view.speaker(L);
+    view.progress(`${L} is weighing ${R}'s points`);
+    leadMsgs.push({ role: "user", content:
+      `[Debate, round ${round}] Before the user sees your answer, ${R} (model ${short(revModel)}) reviewed it and raised these points:\n\n${v.body}\n\n` +
+      `Judge each point on its merits: the reviewer can be wrong too. Verify with tools where it matters, fix any files that need it, and keep what you're confident is right.\n\n` +
+      `Reply in exactly this shape:\n<reply>To ${R}, in 1 to 4 short sentences: what you changed, and which points you disagree with and why.</reply>\n` +
+      `Then the complete final answer for the user (the whole answer, not just the changes). Don't mention the review or the other AI in it.` +
+      (last ? `\n\nThis is the last round. If you still disagree with ${R} on something important, add one short line at the end of the answer telling the user what you two disagree on.` : "") });
+    let revised;
+    try {
+      revised = await agentLoop(leadMsgs, view, signal, { system: systemPrompt(), tools: TOOLS, quiet: true, who: L });
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      view.addStep({ icon: "alert", label: `${L} couldn't revise the answer, so the earlier one stands`, detail: e.message });
+      break;
+    }
+    if (revised === null) break;
+    const { reply, answer } = splitReply(revised);
+    if (answer) current = answer;
+    view.addStep({ icon: "debate", label: reply ? `${L} replied: ${thoughtSnippet(reply, 70)}` : `${L} revised the answer`,
+      detail: (reply ? reply + "\n\n— Revised answer —\n" : "") + current });
+    if (last) break;
+    revMsgs.push({ role: "user", content:
+      `${L} replied: ${reply || "(no comment)"}\n\nIts revised answer:\n"""\n${current}\n"""\n\n` +
+      `Check whether your points were dealt with (look at changed files again if needed). Accept pushback that has a good reason. Same format, listing only points still open.` });
+  }
+  view.speaker(null);
+  result.text = current;
+  return result;
+}
+
+// One request from the user, start to finish.
 async function runTurn(text) {
   trimHistory();
   state.history.push({ role: "user", content: text });
+  const turnStart = state.history.length;
   const userEntry = { kind: "user", text };
   state.log.push(userEntry);
   renderEntry(userEntry, true);
@@ -1050,99 +1265,51 @@ async function runTurn(text) {
   const view = liveTurn(turn);
   const started = Date.now();
   const before = files.snapshot();
+  const changedFiles = () => files.paths().filter((p) => before.get(p) !== files.get(p).mtime);
+  const debating = debateReady();
 
   rateNotice = (secs, n) => view.progress(`${provider().name} asked us to slow down. Trying again in ${secs}s${n > 1 ? ` (attempt ${n + 1})` : ""}`);
   state.running = true;
   state.abort = new AbortController();
   const signal = state.abort.signal;
   setRunningUI(true);
-  let badCalls = 0;
 
   const finish = async (patch) => {
     Object.assign(turn, patch);
     turn.ms = Date.now() - started;
-    turn.files = files.paths().filter((p) => before.get(p) !== files.get(p).mtime);
+    turn.files = changedFiles();
     await view.finish();
   };
 
   try {
-    for (let step = 1; step <= MAX_STEPS; step++) {
-      // THINK (streamed, so the status can show what's actually going on)
-      const thinkStart = Date.now();
-      view.waiting(currentModel());
-      let msg;
-      try {
-        msg = await streamLLM({
-          model: currentModel(),
-          messages: [{ role: "system", content: systemPrompt() }, ...state.history],
-          tools: TOOLS, tool_choice: "auto", temperature: 0.3,
-        }, signal, {
-          reasoning: (chunk, all) => view.thinking(all, chunk.length),
-          content: (chunk, all) => view.answer(all, chunk.length),
-          tool: (call) => view.forming(call.function.name, call.function.arguments),
-        });
-      } catch (e) {
-        if (e.code === "tool_use_failed" && badCalls < 2) {
-          badCalls++;
-          view.dropAnswer();
-          view.addStep({ icon: "retry", label: "Retried a tool call that came out garbled", detail: e.message });
-          state.history.push({ role: "user", content: "[harness note] Your last tool call was malformed and was not run. Retry with valid JSON arguments that match the tool's schema." });
-          continue;
-        }
-        throw e;
-      }
-
-      if (msg.reasoning) {
-        view.addStep({ icon: "think", label: `Thought for ${fmtDuration(Date.now() - thinkStart)}`, detail: msg.reasoning });
-      }
-
-      // ACT + OBSERVE
-      if (msg.tool_calls && msg.tool_calls.length) {
-        if (msg.content) {   // a note to itself before using a tool, not the final answer
-          view.dropAnswer();
-          view.addStep({ icon: "note", label: thoughtSnippet(msg.content, 70) || "Planned the next step", detail: msg.content });
-        }
-        state.history.push({
-          role: "assistant",
-          content: msg.content || null,
-          tool_calls: msg.tool_calls.map((tc) => ({
-            id: tc.id, type: "function", function: { name: tc.function.name, arguments: tc.function.arguments },
-          })),
-        });
-        for (const tc of msg.tool_calls) {
-          const name = tc.function.name;
-          const args = parseArgs(tc.function.arguments);
-          view.running(name, args);
-          let image = null;
-          const result = await executeTool(name, tc.function.arguments, {
-            signal,
-            onProgress: (p) => view.progress(p === "Running Python" ? describe(name, args, false) : p),
-            onImage: (src) => { image = src; view.peek(src); },
-          });
-          const failed = /^Error/.test(result) || /exit code: 1/.test(result);
-          view.addStep({ icon: name, label: describe(name, args, true) + (failed ? " (hit an error)" : ""), detail: stepDetail(name, args, result), image });
-          state.history.push({ role: "tool", tool_call_id: tc.id, content: result });
-        }
-        continue;
-      }
-
-      // CHECK -> DONE
-      state.history.push({ role: "assistant", content: msg.content || "" });
-      await finish({ text: msg.content || "(It finished without saying anything. Try rephrasing.)" });
+    if (debating) view.speaker(provider().name);
+    let answer = await agentLoop(state.history, view, signal, { system: systemPrompt(), tools: TOOLS, quiet: debating, who: "" });
+    if (answer === null) {
+      state.history.push({ role: "assistant", content: `I stopped after ${MAX_STEPS} steps without finishing.` });
+      await finish({ text: `I stopped after ${MAX_STEPS} steps without finishing. Say "continue" to let me keep going.` });
       return;
     }
-    state.history.push({ role: "assistant", content: `I stopped after ${MAX_STEPS} steps without finishing.` });
-    await finish({ text: `I stopped after ${MAX_STEPS} steps without finishing. Say "continue" to let me keep going.` });
+    let debated = null;
+    if (debating) {
+      view.addStep({ icon: "note", label: `${provider().name} drafted an answer`, detail: answer });
+      debated = await debate({ question: text, draft: answer, turnStart, madeFiles: changedFiles(), view, signal });
+      answer = debated.text;
+      state.history[state.history.length - 1] = { role: "assistant", content: answer };   // the agreed answer is what's remembered
+      view.writingFinal();
+    }
+    await finish({ text: answer || "(It finished without saying anything. Try rephrasing.)", debate: debated && { with: debated.with, rounds: debated.rounds, agreed: debated.agreed } });
   } catch (e) {
+    state.speaker = null;
     if (e.name === "AbortError") {
       const partial = view.partialAnswer();
       state.history.push({ role: "assistant", content: partial ? partial + "\n\n(The user stopped this reply.)" : "(The user stopped this request.)" });
       await finish({ text: partial, stopped: true });
     } else {
-      if (state.history.length && state.history[state.history.length - 1].role === "user") state.history.pop();
+      state.history.splice(turnStart - 1);   // forget the failed attempt, so "Try again" starts clean
       await finish({ kind: "error", text: e.message, retry: text });
     }
   } finally {
+    state.speaker = null;
     rateNotice = null;
     state.running = false;
     state.abort = null;
@@ -1180,6 +1347,7 @@ const ICONS = {
   list_files: "M3 6h7l2 2h9v11H3z",
   get_current_time: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM12 7v5l3 2",
   screenshot: "M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
+  debate: "M3 5h12v8H8l-4 3V13H3zM18 9h3v8h-1v3l-4-3h-5v-1",
   chevron: "M9 6l6 6-6 6",
   alert: "M12 4 2.5 20h19ZM12 10v4M12 17h.01",
   share: "M12 3v12M8 7l4-4 4 4M5 12v8h14v-8",
@@ -1462,11 +1630,16 @@ function stepsList(steps) {
   return el("ol", { class: "steps" }, ...steps.map((s) => stepRow(s)));
 }
 
+function workedLabel(turn) {
+  const d = turn.debate;
+  const extra = !d || !d.rounds ? "" : d.agreed ? (d.rounds === 1 ? `, ${d.with} agreed` : `, agreed after ${d.rounds} rounds`) : `, debated ${d.rounds} round${d.rounds === 1 ? "" : "s"}`;
+  return `Worked for ${fmtDuration(turn.ms)}${extra}`;
+}
 function activityNode(turn) {
   if (!turn.steps || !turn.steps.length) return null;
   const onlyThought = turn.steps.length === 1 && (turn.steps[0].icon === "think");
   const label = onlyThought ? turn.steps[0].label
-    : turn.ms ? `Worked for ${fmtDuration(turn.ms)}` : `${turn.steps.length} step${turn.steps.length === 1 ? "" : "s"}`;   // older chats have no timing
+    : turn.ms ? workedLabel(turn) : `${turn.steps.length} step${turn.steps.length === 1 ? "" : "s"}`;   // older chats have no timing
   return el("details", { class: "activity" },
     el("summary", {}, el("span", { class: "activity-label" }, label), icon("chevron", "ico chev")),
     stepsList(turn.steps));
@@ -1540,7 +1713,8 @@ function liveTurn(turn) {
   const loader = makeLoader();
   const statusBox = el("span", { class: "status-text" });
   const ticker = makeTicker(statusBox);
-  const summary = el("summary", {}, loader.node, statusBox, icon("chevron", "ico chev"));
+  const speakerTag = el("span", { class: "speaker", hidden: "" });
+  const summary = el("summary", {}, loader.node, speakerTag, statusBox, icon("chevron", "ico chev"));
   const steps = el("ol", { class: "steps" });
   const live = el("details", { class: "activity live" }, summary, steps);
   const answerBox = el("div", { class: "md streaming" });
@@ -1582,6 +1756,23 @@ function liveTurn(turn) {
       setStatus(describe(name, args, false), "run:" + name + JSON.stringify(args).slice(0, 80), 700, false, 350);   // real actions cut in quickly
     },
     progress(text) { setStatus(text, "progress:" + text, 500); },
+    speaker(name) {                      // during a debate: whose turn it is
+      if (!name) { speakerTag.hidden = true; return; }
+      if (speakerTag.textContent === name && !speakerTag.hidden) return;
+      speakerTag.textContent = name;
+      speakerTag.dataset.p = name.toLowerCase();
+      speakerTag.hidden = false;
+      if (!reduceMotion) { speakerTag.classList.remove("speaker-in"); void speakerTag.offsetWidth; speakerTag.classList.add("speaker-in"); }
+    },
+    drafting(chars) {                    // a draft is being written; it's only shown once the debate is over
+      loader.feed(chars);
+      if (phase !== "drafting") { phase = "drafting"; loader.mood("answer"); setStatus("Writing a draft", "drafting", 400); }
+    },
+    writingFinal() {
+      speakerTag.hidden = true;
+      phase = "answer"; loader.mood("answer");
+      setStatus("Writing the answer", "answer", 0, true);
+    },
     answer(all, chars) {
       loader.feed(chars);
       if (phase !== "answer") { phase = "answer"; loader.mood("answer"); setStatus("Writing the answer", "answer", 0); }
@@ -1619,7 +1810,8 @@ function liveTurn(turn) {
       const label = turn.kind === "error" ? (turn.steps.length ? `Worked for ${fmtDuration(turn.ms)}` : "")
         : turn.stopped ? "Stopped"
         : !turn.steps.length ? ""
-        : onlyThought ? turn.steps[0].label : `Worked for ${fmtDuration(turn.ms)}`;
+        : onlyThought ? turn.steps[0].label : workedLabel(turn);
+      speakerTag.remove();
       const spin = loader.spinDown();
       if (label) ticker.set(label, "final", 0, true);
       live.classList.remove("live");
@@ -1715,7 +1907,9 @@ function updateSendState() {
 }
 function updateSubtitle() {
   ui.version.textContent = "v" + APP_VERSION;
-  ui.subtitle.textContent = apiKey() ? `${provider().name}, ${currentModel().split("/").pop()}` : "No key yet";
+  ui.subtitle.textContent = !apiKey() ? "No key yet"
+    : debateReady() ? `${provider().name} ⇄ ${PROVIDERS[otherProvider()].name}, debating`
+    : `${provider().name}, ${currentModel().split("/").pop()}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2105,6 +2299,7 @@ const f = {
   vision: document.getElementById("visionList"),
   customVision: document.getElementById("customVision"),
   ask: document.getElementById("askInput"),
+  debate: document.getElementById("debateInput"),
   relay: document.getElementById("relayInput"),
   seg: document.getElementById("providerSeg"),
   models: document.getElementById("modelList"),
@@ -2147,6 +2342,15 @@ function showProvider(p) {
   document.getElementById("relayGroup").hidden = p !== "groq";
   document.getElementById("forgetBtn").textContent = `Forget ${P.name} key`;
   renderModels();
+  renderDebateFoot();
+}
+function renderDebateFoot() {
+  const lead = PROVIDERS[draft.provider], otherId = Object.keys(PROVIDERS).find((p) => p !== draft.provider), other = PROVIDERS[otherId];
+  const missing = !draft.keys[otherId] || !draft.keys[draft.provider];
+  document.getElementById("debateFoot").textContent =
+    `${lead.name} does the work and drafts the answer; ${other.name} checks it. They go back and forth, up to ${DEBATE_ROUNDS} rounds, until they agree. ` +
+    `Slower, and uses more requests from both. Works best when the two use different models.` +
+    (missing ? ` Add ${!draft.keys[otherId] ? `a ${other.name}` : `a ${lead.name}`} key to use this.` : "");
 }
 function renderSettingsFiles() {
   const list = document.getElementById("fileRows");
@@ -2171,6 +2375,7 @@ function openSettings() {
   document.getElementById("toggleKey").textContent = "Show";
   showProvider(draft.provider);
   f.ask.checked = state.settings.askBeforeCode;
+  f.debate.checked = state.settings.debate;
   f.relay.value = state.settings.relayUrl;
   renderSettingsFiles();
   settingsDlg.showModal();
@@ -2186,6 +2391,7 @@ function applySettings() {
     state.settings.visionModels[p] = draft.visionModels[p] || PROVIDERS[p].visionModel;
   }
   state.settings.askBeforeCode = f.ask.checked;
+  state.settings.debate = f.debate.checked;
   state.settings.relayUrl = f.relay.value.trim();
   save.settings();
   draft = null;
@@ -2207,6 +2413,8 @@ f.key.addEventListener("input", () => {
     draft.keys[p] = v;
     showProvider(p);
   }
+  if (!p || p === draft.provider) draft.keys[draft.provider] = v;
+  renderDebateFoot();
 });
 for (const [kind, c] of Object.entries(CHOICES)) {
   c.other().addEventListener("input", () => {
@@ -2222,6 +2430,7 @@ document.getElementById("toggleKey").addEventListener("click", (e) => {
 document.getElementById("forgetBtn").addEventListener("click", () => {
   draft.keys[draft.provider] = "";
   f.key.value = "";
+  renderDebateFoot();
 });
 document.getElementById("clearFilesBtn").addEventListener("click", () => {
   for (const p of files.paths()) files.remove(p);

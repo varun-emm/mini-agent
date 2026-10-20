@@ -48,6 +48,19 @@ Mini Agent has a **screenshot** tool. After it makes a chart, PDF, Word, Excel, 
 - The vision model is set in **Settings → Vision model**: `qwen/qwen3.8-27b` on Groq, and `anthropic/claude-haiku-5.5` on OpenRouter by default.
 - PowerPoint files can't be screenshotted. The agent checks those by reading them with python-pptx.
 
+## Debate mode: two AIs check each other
+
+Save both a Groq key and an OpenRouter key, then turn on **Settings → Debate**. Every answer then goes through a debate before you see it:
+
+1. The provider picked in Settings (the **lead**) does the work: searches, code, files. Then it writes a draft.
+2. The other provider (the **reviewer**) checks the draft. It can verify facts with web search, redo maths with the calculator, and screenshot or read the files the lead made. Then it says **agree**, or lists what's wrong.
+3. The lead weighs each point, fixes what's right (including the files), pushes back on what isn't, and writes a new answer.
+4. Steps 2 and 3 repeat until the reviewer agrees, up to 3 rounds. If they still disagree after that, the answer says what they disagree on.
+
+While it runs, a coloured tag in the status line shows whose turn it is. Afterwards the summary says, for example, **Worked for 40s, agreed after 2 rounds**. Tap it to read the whole exchange. The title shows **Groq ⇄ OpenRouter, debating** while it's on.
+
+It's slower and uses more requests from both providers. It works best when the two use different models, such as gpt-oss-120b on Groq and claude-sonnet-5.5 on OpenRouter. If the reviewer can't be reached (no credits, rate limit), you still get the lead's answer, with a note in the steps.
+
 ## Chat history
 
 Every conversation is saved on your device. Tap the sidebar button (top left) to see them, grouped by day, with search. **Settings** is at the top of that sidebar, or tap the model name under the title. Tap **Edit** to delete chats. Each chat keeps its own files, and the pencil button (top right) starts a new chat.
@@ -104,7 +117,8 @@ The model only ever writes text. `app.js` is the **harness** around it:
 
 | Concept | Where it lives |
 |---|---|
-| Agent loop | `runTurn()` in `app.js` |
+| Agent loop | `agentLoop()` in `app.js` (`runTurn()` runs one request) |
+| Debate | `debate()`, `reviewerPrompt()`, `readVerdict()` |
 | Providers | `PROVIDERS` and `callLLM()` (both speak the same OpenAI-style API) |
 | Tool definitions | `TOOLS` (each description tells the model *when* to use the tool) |
 | Tool code | `TOOL_FUNCTIONS` |

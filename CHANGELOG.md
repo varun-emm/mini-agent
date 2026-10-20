@@ -6,6 +6,7 @@ Numbering: **major** for a big redesign, **minor** for a new feature, **patch** 
 
 | Version | Date | What changed | Commit |
 |---|---|---|---|
+| 2.6.0 | 2026-10-20 | Debate mode: Groq and OpenRouter debate each answer until they agree (up to 3 rounds). Switch in Settings → Debate | (this release) |
 | 2.5.0 | 2026-10-20 | Version number shown next to the title, and this changelog | [871bbe9](https://github.com/varun-emm/mini-agent/commit/871bbe9) |
 | 2.4.0 | 2026-10-20 | Loader colours shift around the colour wheel with the task (backwards while searching). Saturation and see-through back to normal | [d3f4875](https://github.com/varun-emm/mini-agent/commit/d3f4875) |
 | 2.3.0 | 2026-10-19 | Loader saturation and see-through change with the task (never below 60%) | [ecaa6cd](https://github.com/varun-emm/mini-agent/commit/ecaa6cd) |

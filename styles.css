@@ -163,6 +163,18 @@ a:hover { text-decoration: underline; }
 .activity .chev { width: 14px; height: 14px; transition: transform 200ms ease; }
 .activity[open] > summary .chev { transform: rotate(90deg); }
 .loader { width: 24px; height: 24px; flex: none; }
+/* during a debate: whose turn it is */
+.speaker {
+  flex: none; padding: 1px 8px; border-radius: 9px; font-size: 12px; font-weight: 600; line-height: 1.5;
+  color: #fff; background: #5E5CE6; letter-spacing: 0.01em;
+}
+.speaker[data-p="groq"] { background: #F55036; }
+.speaker[data-p="openrouter"] { background: #6467F2; }
+.speaker[hidden] { display: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .speaker-in { animation: speaker-in 320ms cubic-bezier(.2, .8, .2, 1) both; }
+  @keyframes speaker-in { from { opacity: 0; transform: scale(0.7); } to { opacity: 1; transform: none; } }
+}
 .status-text { color: var(--label-2); }
 /* while working: a soft band of brightness sweeps across the status line */
 .live .status-text { color: var(--label); }
