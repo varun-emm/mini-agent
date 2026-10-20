@@ -112,7 +112,9 @@ a:hover { text-decoration: underline; }
   justify-self: center; border: 0; background: none; padding: 2px 10px; border-radius: 12px;
   display: flex; flex-direction: column; align-items: center; line-height: 1.2; max-width: 100%;
 }
-.nav-name { font-weight: 600; font-size: 17px; }
+.nav-name { font-weight: 600; font-size: 17px; display: inline-flex; align-items: center; }
+.nav-ver { margin-left: 6px; padding: 1px 6px; border-radius: 7px; background: var(--fill); color: var(--label-2); font-size: 11px; font-weight: 500; font-variant-numeric: tabular-nums; letter-spacing: 0.01em; }
+.nav-ver:empty { display: none; }
 .nav-sub { font-size: 12px; color: var(--label-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 56vw; }
 .nav-sub-row { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; }
 .nav-chev { width: 12px; height: 12px; flex: none; fill: none; stroke: var(--label-2); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }

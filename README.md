@@ -4,6 +4,8 @@ A tiny AI agent that runs in your browser on [Groq](https://groq.com) or [OpenRo
 
 **Open it:** https://varun-emm.github.io/mini-agent/ (after the one-time setup below)
 
+The version number is shown next to the title. See [CHANGELOG.md](CHANGELOG.md) for what changed in each one.
+
 ## What it can do
 
 | Tool | What it does |

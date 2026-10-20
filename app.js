@@ -2,6 +2,10 @@
    Everything here is the "harness". The model only writes text; this file runs the tools. */
 "use strict";
 
+// The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
+// and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
+const APP_VERSION = "2.5.0";
+
 // ---------------------------------------------------------------------------
 // Providers: where the "brain" lives. Both speak the same OpenAI-style API.
 // ---------------------------------------------------------------------------
@@ -537,7 +541,7 @@ function calculate(expression) {
 const python = {
   worker: null, seq: 0, pending: new Map(), warmed: false,
   start() {
-    this.worker = new Worker("py-worker.js?v=20261020a");
+    this.worker = new Worker(`py-worker.js?v=${APP_VERSION}`);
     this.worker.onmessage = (e) => {
       const p = this.pending.get(e.data.id);
       if (!p) return;
@@ -1227,6 +1231,7 @@ const ui = {
   input: document.getElementById("input"),
   send: document.getElementById("sendBtn"),
   subtitle: document.getElementById("subtitle"),
+  version: document.getElementById("version"),
 };
 const nearBottom = () => ui.chat.scrollHeight - ui.chat.scrollTop - ui.chat.clientHeight < 160;
 const scrollDown = (force) => { if (force || nearBottom()) ui.chat.scrollTop = ui.chat.scrollHeight; };
@@ -1709,6 +1714,7 @@ function updateSendState() {
   ui.send.disabled = !state.running && !ui.input.value.trim();
 }
 function updateSubtitle() {
+  ui.version.textContent = "v" + APP_VERSION;
   ui.subtitle.textContent = apiKey() ? `${provider().name}, ${currentModel().split("/").pop()}` : "No key yet";
 }
 
