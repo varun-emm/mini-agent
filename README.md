@@ -31,15 +31,15 @@ The answer flows in paragraph by paragraph, then the line settles into **Worked 
 
 The spinner is your animation, and it turns and pulses with the work:
 
-| What's happening | Spin | Pulse | Glow | Colour shift |
-|---|---|---|---|---|
-| Waiting for the model's first word | slow drift | slow, even breath | blue | barely drifts |
-| Thinking | clockwise | breath that quickens as words arrive | violet | slides steadily |
-| Searching, reading, looking at a screenshot | counter-clockwise | draws in (shrinks) on each beat | teal | slides backwards |
-| Making a file or running code | clockwise, fast | strong double heartbeat | pink | sweeps fastest |
-| Writing the answer | clockwise | gentle beat on each burst of words | blue | slides gently |
+| What's happening | Spin | Animation frames | Pulse | Glow | Colour shift |
+|---|---|---|---|---|---|
+| Waiting for the model's first word | slow drift | about half speed | slow, even breath | blue | barely drifts |
+| Thinking | clockwise | normal speed | breath that quickens as words arrive | violet | slides steadily |
+| Searching, reading, looking at a screenshot | counter-clockwise | backwards | draws in (shrinks) on each beat | teal | slides backwards |
+| Making a file or running code | clockwise, fast | almost double speed | strong double heartbeat | pink | sweeps fastest |
+| Writing the answer | clockwise | a little faster | gentle beat on each burst of words | blue | slides gently |
 
-Its colours slide around the colour wheel (a hue shift) while saturation and transparency stay normal. Speed and colour shift both follow how fast text is arriving, each beat pushes the colours a little further, every finished step gives it a little pop and a quick colour jump, and it eases between moods. When the work is done it swells once and shrinks away.
+The app plays your animation frame by frame from a strip of its 60 frames (`assets/loader-frames.webp`), so it controls the speed and direction. Its colours slide around the colour wheel (a hue shift) while saturation and transparency stay normal. Speed and colour shift both follow how fast text is arriving, each beat pushes the colours a little further, every finished step gives it a little pop and a quick colour jump, and it eases between moods. When the work is done it swells once and shrinks away.
 
 ## Built for bigger jobs (v3)
 

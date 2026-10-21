@@ -4,7 +4,7 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "3.0.0";
+const APP_VERSION = "3.1.0";
 
 // ---------------------------------------------------------------------------
 // Providers: where the "brain" lives. Both speak the same OpenAI-style API.
@@ -1738,25 +1738,30 @@ const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 // the glow colour (picked from the colours in your animation), and the hue shift:
 // drift = degrees per second the colours slide around the colour wheel (faster as text pours in,
 // and backwards when the spin is backwards), swing = extra degrees each pulse beat pushes them.
+// fps = how fast your animation's own frames play, as a multiple of its original speed (16.7 frames a second);
+// negative plays it backwards. It also speeds up as text pours in, and eases to a stop when the work is done.
 //   breath    = a slow, even swell
 //   inhale    = it draws in (shrinks) on each beat: taking information in
 //   heartbeat = a strong double beat that pushes out: making something
 const LOADER_MOODS = {
-  waiting: { dir: 1, base: 0.35, shape: "breath", amp: 0.06, hz: 0.55, glow: [70, 140, 255], drift: 12, swing: 8 },
-  thinking: { dir: 1, base: 0.8, shape: "breath", amp: 0.07, hz: 1.05, glow: [150, 110, 255], drift: 28, swing: 16 },
-  forming: { dir: 1, base: 1.1, shape: "breath", amp: 0.07, hz: 1.7, glow: [90, 190, 255], drift: 40, swing: 18 },
-  pull: { dir: -1, base: 1.6, shape: "inhale", amp: 0.12, hz: 1.25, glow: [40, 225, 190], drift: 48, swing: 28 },
-  make: { dir: 1, base: 2.0, shape: "heartbeat", amp: 0.14, hz: 1.1, glow: [255, 80, 190], drift: 75, swing: 36 },
-  answer: { dir: 1, base: 0.9, shape: "breath", amp: 0.05, hz: 0.9, glow: [60, 130, 255], drift: 30, swing: 10 },
-  done: { dir: 1, base: 0, shape: "breath", amp: 0, hz: 0.5, glow: [70, 140, 255], drift: 0, swing: 0 },
+  waiting: { dir: 1, base: 0.35, shape: "breath", amp: 0.06, hz: 0.55, glow: [70, 140, 255], fps: 0.45, drift: 12, swing: 8 },
+  thinking: { dir: 1, base: 0.8, shape: "breath", amp: 0.07, hz: 1.05, glow: [150, 110, 255], fps: 1, drift: 28, swing: 16 },
+  forming: { dir: 1, base: 1.1, shape: "breath", amp: 0.07, hz: 1.7, glow: [90, 190, 255], fps: 1.3, drift: 40, swing: 18 },
+  pull: { dir: -1, base: 1.6, shape: "inhale", amp: 0.12, hz: 1.25, glow: [40, 225, 190], fps: -1.3, drift: 48, swing: 28 },
+  make: { dir: 1, base: 2.0, shape: "heartbeat", amp: 0.14, hz: 1.1, glow: [255, 80, 190], fps: 1.8, drift: 75, swing: 36 },
+  answer: { dir: 1, base: 0.9, shape: "breath", amp: 0.05, hz: 0.9, glow: [60, 130, 255], fps: 1.1, drift: 30, swing: 10 },
+  done: { dir: 1, base: 0, shape: "breath", amp: 0, hz: 0.5, glow: [70, 140, 255], fps: 0, drift: 0, swing: 0 },
 };
+// Your animation, as a strip of its 60 frames (10 across, 6 down), so the app can play it at any speed.
+const SPRITE = { frames: 60, cols: 10, rows: 6, fps: 1000 / 60 };
 const PULSE_SHAPES = {
   breath: (p) => (1 - Math.cos(2 * Math.PI * p)) / 2 - 0.35,
   inhale: (p) => -Math.pow(Math.sin(Math.PI * p), 3),
   heartbeat: (p) => Math.exp(-(((p - 0.06) / 0.055) ** 2)) + 0.65 * Math.exp(-(((p - 0.3) / 0.06) ** 2)),
 };
 function makeLoader() {
-  const img = el("img", { class: "loader", src: reduceMotion ? "assets/loader-still.png" : "assets/loader.webp", alt: "" });
+  const img = reduceMotion ? el("img", { class: "loader", src: "assets/loader-still.png", alt: "" })
+    : el("span", { class: "loader loader-sprite" });
   const wrap = el("span", { class: "loader-wrap", "aria-hidden": "true" }, img);
   let anim = null;
   if (!reduceMotion && img.animate) {
@@ -1773,6 +1778,14 @@ function makeLoader() {
   let glow = [...mood.glow];
   let drift = mood.drift, swing = mood.swing;   // ease toward the mood's, like the glow
   let hueBase = 0, hueNow = 0;                    // degrees around the colour wheel
+  let frame = Math.random() * SPRITE.frames, fpsNow = mood.fps * SPRITE.fps, shownFrame = -1;
+  const showFrame = () => {
+    const f = ((Math.floor(frame) % SPRITE.frames) + SPRITE.frames) % SPRITE.frames;
+    if (f === shownFrame) return;
+    shownFrame = f;
+    img.style.backgroundPosition = `${((f % SPRITE.cols) / (SPRITE.cols - 1)) * 100}% ${(Math.floor(f / SPRITE.cols) / (SPRITE.rows - 1)) * 100}%`;
+  };
+  if (!reduceMotion) showFrame();
   let pulseValue = 0;
   let raf = 0;
   let last = performance.now();
@@ -1805,6 +1818,11 @@ function makeLoader() {
     hueBase = (hueBase + Math.sign(rate || 1) * drift * (1 + boost * 0.6) * dt + 360) % 360;
     const beat = Math.max(0, Math.min(1, shape === "breath" ? raw + 0.35 : Math.abs(raw)));
     hueNow = hueBase + swing * beat + kick * 160;
+    // the animation's own frames: speed set by the mood and how fast text arrives; backwards for searching
+    const fpsTarget = mood.fps * SPRITE.fps * (1 + boost * 0.35);
+    fpsNow += (fpsTarget - fpsNow) * Math.min(1, dt * 3);
+    frame += fpsNow * dt;
+    showFrame();
     if (!stopping) {
       wrap.style.transform = `scale(${scale.toFixed(3)})`;
       wrap.style.filter = `drop-shadow(0 0 ${blur}px rgba(${glow.map((c) => c | 0).join(",")},${alpha}))`;
@@ -1819,11 +1837,13 @@ function makeLoader() {
     node: wrap,
     mood(name) { mood = LOADER_MOODS[name] || LOADER_MOODS.thinking; run(); },
     feed(chars) { flow += chars * 4; kick = Math.min(0.14, kick + chars / 700); run(); },   // every streamed chunk nudges it
-    step() { steps++; kick = Math.min(0.3, kick + 0.22); run(); },                         // a finished step: a pop
+    step() { steps++; kick = Math.min(0.3, kick + 0.22); fpsNow += (fpsNow < 0 ? -1 : 1) * 12; run(); },                         // a finished step: a pop
     get direction() { return rate < 0 ? -1 : 1; },
     get rate() { return rate; },
     get scale() { return 1 + pulseValue + kick; },
     get hue() { return ((hueNow % 360) + 360) % 360; },
+    get fps() { return fpsNow; },
+    get frame() { return shownFrame; },
     async spinDown() {
       mood = LOADER_MOODS.done; kick = Math.min(0.3, kick + 0.2); run();               // one last swell...
       await new Promise((r) => setTimeout(r, reduceMotion ? 0 : 600));

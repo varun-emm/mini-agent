@@ -163,6 +163,7 @@ a:hover { text-decoration: underline; }
 .activity .chev { width: 14px; height: 14px; transition: transform 200ms ease; }
 .activity[open] > summary .chev { transform: rotate(90deg); }
 .loader { width: 24px; height: 24px; flex: none; }
+.loader-sprite { display: block; background: url(assets/loader-frames.webp) 0 0 / 1000% 600% no-repeat; }
 /* during a debate: whose turn it is */
 .speaker {
   flex: none; padding: 1px 8px; border-radius: 9px; font-size: 12px; font-weight: 600; line-height: 1.5;

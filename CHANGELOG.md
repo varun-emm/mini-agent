@@ -6,6 +6,7 @@ Numbering: **major** for a big redesign, **minor** for a new feature, **patch** 
 
 | Version | Date | What changed | Commit |
 |---|---|---|---|
+| 3.1.0 | 2026-10-21 | The loader's own animation now plays at a speed set by the task: slow while waiting, faster while thinking, fastest while making files, backwards while searching, and eases to a stop at the end | (this release) |
 | 3.0.0 | 2026-10-21 | Bigger jobs: a live plan checklist; parallel searches and helper agents; attach your own files; up to 60 steps with old messages summarised instead of forgotten; memory across chats (Settings → Memory); real web page text with a reader. Stopping mid-task no longer breaks the next message | [859e6be](https://github.com/varun-emm/mini-agent/commit/859e6be) |
 | 2.6.0 | 2026-10-20 | Debate mode: Groq and OpenRouter debate each answer until they agree (up to 3 rounds). Switch in Settings → Debate | [13a5ea7](https://github.com/varun-emm/mini-agent/commit/13a5ea7) |
 | 2.5.0 | 2026-10-20 | Version number shown next to the title, and this changelog | [871bbe9](https://github.com/varun-emm/mini-agent/commit/871bbe9) |
