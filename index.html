@@ -14,7 +14,7 @@
   <link rel="icon" type="image/png" href="assets/icon.png">
   <link rel="apple-touch-icon" href="assets/icon.png">
   <link rel="preload" href="assets/loader.webp" as="image">
-  <link rel="stylesheet" href="styles.css?v=2.6.0">
+  <link rel="stylesheet" href="styles.css?v=3.0.0">
 </head>
 <body>
   <div class="app">
@@ -37,6 +37,11 @@
 
     <div class="bottom-edge" aria-hidden="true"></div>
     <form class="composer" id="composer" autocomplete="off">
+      <div class="attach-row" id="attachRow" hidden></div>
+      <button class="attach" id="attachBtn" type="button" aria-label="Attach files">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11.5 12.4 19a5 5 0 0 1-7.1-7.1l8.1-8.1a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.1a1.7 1.7 0 0 1-2.4-2.4l7.5-7.5"/></svg>
+      </button>
+      <input type="file" id="fileInput" multiple hidden>
       <label for="input" class="sr-only">Message</label>
       <textarea id="input" rows="1" placeholder="Ask anything"></textarea>
       <button class="send" id="sendBtn" type="submit" aria-label="Send" disabled>
@@ -119,6 +124,21 @@
           </label>
         </div>
         <div class="group-foot">Looks at the screenshots the agent takes to check its work. It must accept images.</div>
+      </div>
+
+      <div class="group">
+        <div class="group-head">Memory</div>
+        <div class="cells">
+          <label class="cell cell-toggle">
+            <span>Remember things across chats</span>
+            <input type="checkbox" class="switch" id="memoryInput">
+          </label>
+        </div>
+        <div class="cells spaced" id="memoryRows" hidden></div>
+        <div class="group-foot" id="memoryFoot"></div>
+        <div class="cells spaced">
+          <button type="button" class="cell cell-danger" id="forgetMemoryBtn" hidden>Forget everything</button>
+        </div>
       </div>
 
       <div class="group">
@@ -205,6 +225,6 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-  <script src="app.js?v=2.6.0"></script>
+  <script src="app.js?v=3.0.0"></script>
 </body>
 </html>

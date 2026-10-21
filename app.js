@@ -4,7 +4,7 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "2.6.0";
+const APP_VERSION = "3.0.0";
 
 // ---------------------------------------------------------------------------
 // Providers: where the "brain" lives. Both speak the same OpenAI-style API.
@@ -33,9 +33,12 @@ const PROVIDERS = {
     models: [["openai/gpt-oss-120b", "Cheap and capable"], ["anthropic/claude-sonnet-5.5", "Smarter, costs more"]],
   },
 };
-const MAX_STEPS = 20;
+const MAX_STEPS = 60;              // steps per request before it stops and asks to continue
+const HELPER_STEPS = 25;           // steps a helper agent may take
 const MAX_TOOL_OUTPUT = 6000;
-const MAX_HISTORY_CHARS = 60000;
+// When the conversation the model sees grows past this many characters, old tool output is shortened
+// and older turns are summarised by the model (instead of being forgotten).
+const CONTEXT_CHARS = Number(localStorage.getItem("ma.ctxChars")) || 70000;
 
 // ---------------------------------------------------------------------------
 // Settings & chat storage (localStorage, this browser only)
@@ -62,6 +65,7 @@ function loadSettings() {
     askBeforeCode: false,
     relayUrl: "",
     debate: false,       // the other provider reviews each answer and they debate until they agree
+    memory: true,        // remember facts about the user across chats
   };
   if (typeof saved.apiKey === "string") s.keys.groq = saved.apiKey;            // first version
   if (typeof saved.model === "string" && saved.model) s.models.groq = saved.model;
@@ -72,6 +76,7 @@ function loadSettings() {
   if (typeof saved.askBeforeCode === "boolean") s.askBeforeCode = saved.askBeforeCode;
   if (typeof saved.relayUrl === "string") s.relayUrl = saved.relayUrl;
   if (typeof saved.debate === "boolean") s.debate = saved.debate;
+  if (typeof saved.memory === "boolean") s.memory = saved.memory;
   if (!s.keys[s.provider]) {
     const withKey = Object.keys(PROVIDERS).find((p) => s.keys[p]);
     if (withKey) s.provider = withKey;
@@ -85,6 +90,34 @@ function detectProvider(key) {
   return null;
 }
 
+// Memory across chats: short facts the user told the agent, kept on this device and added to every chat.
+const memory = {
+  items: (() => { try { const v = JSON.parse(localStorage.getItem("ma.memory") || "[]"); return Array.isArray(v) ? v : []; } catch (_) { return []; } })(),
+  save() { store.set("ma.memory", this.items); },
+  add(text) {
+    text = String(text || "").replace(/\s+/g, " ").trim().slice(0, 240);
+    if (!text) throw new Error("fact is required");
+    const same = this.items.find((m) => m.text.toLowerCase() === text.toLowerCase());
+    if (same) return false;
+    this.items.push({ id: "m" + Date.now().toString(36) + Math.random().toString(36).slice(2, 5), text, at: Date.now() });
+    while (this.items.length > 60) this.items.shift();
+    this.save();
+    return true;
+  },
+  forget(query) {
+    const q = String(query || "").toLowerCase().trim();
+    if (!q) return [];
+    const words = q.split(/\W+/).filter((w) => w.length > 2);
+    const hit = (t) => { t = t.toLowerCase(); return t.includes(q) || q.includes(t) || (words.length && words.filter((w) => t.includes(w)).length >= Math.ceil(words.length * 0.6)); };
+    const gone = this.items.filter((m) => hit(m.text));
+    this.items = this.items.filter((m) => !gone.includes(m));
+    this.save();
+    return gone.map((m) => m.text);
+  },
+  removeId(id) { this.items = this.items.filter((m) => m.id !== id); this.save(); },
+  clear() { this.items = []; this.save(); },
+};
+
 const state = {
   settings: loadSettings(),
   chat: null,          // the conversation that's open (null = a fresh, unsaved one)
@@ -93,6 +126,7 @@ const state = {
   running: false,
   abort: null,
   speaker: null,       // during a debate, the provider that's talking right now (null = the one picked in Settings)
+  pending: [],         // files attached in the composer, waiting to be sent
 };
 
 const activeId = () => state.speaker || state.settings.provider;
@@ -545,7 +579,7 @@ function calculate(expression) {
 
 // Python runs in a Web Worker with Pyodide (downloaded once, then cached by the browser).
 const python = {
-  worker: null, seq: 0, pending: new Map(), warmed: false,
+  worker: null, seq: 0, pending: new Map(), warmed: false, queue: Promise.resolve(),
   start() {
     this.worker = new Worker(`py-worker.js?v=${APP_VERSION}`);
     this.worker.onmessage = (e) => {
@@ -568,7 +602,14 @@ const python = {
     for (const p of this.pending.values()) p.resolve({ ok: false, error: "Stopped." });
     this.pending.clear();
   },
+  // helpers can ask for Python at the same time: runs wait their turn, so they never trip over each other's files
   run(code, timeoutMs, onProgress) {
+    const go = () => this.runNow(code, timeoutMs, onProgress);
+    const next = this.queue.then(go, go);
+    this.queue = next.catch(() => {});
+    return next;
+  },
+  runNow(code, timeoutMs, onProgress) {
     if (!this.worker) this.start();
     const id = ++this.seq;
     const payload = {};
@@ -579,7 +620,8 @@ const python = {
         this.kill();
         resolve({ ok: false, error: `Stopped after ${Math.round(timeoutMs / 1000)} seconds (too slow, or stuck in a loop).` });
       }, timeoutMs);
-      this.pending.set(id, { onProgress, resolve: (r) => { clearTimeout(timer); resolve(r); } });
+      const sent = Object.keys(payload);
+      this.pending.set(id, { onProgress, resolve: (r) => { clearTimeout(timer); resolve({ ...r, sent }); } });
       this.worker.postMessage({ id, code, files: payload });
     });
   },
@@ -597,13 +639,14 @@ function approveCode(code) {
 }
 
 // Bring the worker's copy of the workspace back, and report what changed.
-function syncFromPython(returned) {
+function syncFromPython(returned, sent) {
   const changed = [];
   for (const [path, bytes] of Object.entries(returned || {})) {
     const cur = files.get(path);
     if (!cur || !sameBytes(cur.bytes, bytes)) { files.put(path, bytes); changed.push(path); }
   }
-  const removed = files.paths().filter((p) => !(p in (returned || {})));
+  // only files Python was given can have been deleted by it (others may have been added meanwhile)
+  const removed = files.paths().filter((p) => !(p in (returned || {})) && (!sent || sent.includes(p)));
   for (const p of removed) files.remove(p);
   return { changed, removed };
 }
@@ -789,16 +832,74 @@ Answer precisely and concisely. Quote the exact text and numbers you can read. L
   return text || String(m.reasoning || "").trim().slice(-1500) || "(The vision model didn't return an answer.)";
 }
 
+// Reading a web page: get its real text, not a summary.
+//   1. your own relay (if you deployed it to Vercel): it fetches the page server-side
+//   2. Jina Reader (r.jina.ai), a free public service that turns a page into clean text
+//   3. if both fail, the old way: a search model visits the page and reports what's on it
+const PAGE_CHUNK = 8000;
+const pageCache = new Map();
+function relayBase() {
+  if (location.hostname.endsWith(".vercel.app")) return "";
+  const r = (state.settings.relayUrl || "").trim();
+  return r ? r.replace(/\/api\/chat\/?$/, "") : null;
+}
+function withTimeout(signal, ms) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  if (signal) signal.addEventListener("abort", () => c.abort(), { once: true });
+  return { signal: c.signal, done: () => clearTimeout(t) };
+}
+async function readPage(url, signal) {
+  if (pageCache.has(url)) return pageCache.get(url);
+  const tries = [];
+  const base = relayBase();
+  if (base !== null) tries.push(["your relay", `${base}/api/fetch?url=${encodeURIComponent(url)}`]);
+  tries.push(["Jina Reader", `https://r.jina.ai/${url}`]);
+  for (const [how, u] of tries) {
+    const t = withTimeout(signal, 25000);
+    try {
+      const res = await fetch(u, { signal: t.signal });
+      if (!res.ok) continue;
+      const text = (await res.text()).replace(/\r/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
+      if (text.length < 80 || /^\{"(code|error)"/.test(text)) continue;
+      const page = { text, how };
+      pageCache.set(url, page);
+      return page;
+    } catch (e) {
+      if (signal && signal.aborted) throw e;   // the user pressed Stop; a timeout just moves on
+    } finally { t.done(); }
+  }
+  return null;
+}
+
+// A helper agent: works on one self-contained task with its own conversation, in parallel with others.
+function helperPrompt() {
+  return systemPrompt().replace(/^You are Mini Agent[^\n]*/, "You are a helper agent inside Mini Agent. A lead agent gave you one self-contained task; other helpers may be working on other parts at the same time. Do the task completely with your tools, then reply with a clear, factual report for the lead agent (not for the user): the findings with numbers, dates and source URLs, and the names of any files you made.")
+    .replace(/\nPlanning:[\s\S]*?(?=\n\n)/, "").replace(/\nHelpers and parallel work:[\s\S]*?(?=\n\n)/, "").replace(/\nMemory:[\s\S]*?(?=\n\n)/, "");
+}
+
 const TOOL_FUNCTIONS = {
   async web_search({ query }, ctx) {
     if (!query) throw new Error("query is required");
     return askWeb(`Search the web and answer concisely and factually. Include specific numbers and dates, and list the source URLs you used.\n\nQuery: ${query}`, ctx.signal);
   },
-  async fetch_webpage({ url }, ctx) {
+  async fetch_webpage({ url, start }, ctx) {
     let host = "";
     try { host = new URL(url).hostname; } catch (_) { /* invalid */ }
     if (!/^https?:\/\//i.test(url || "") || !host) throw new Error("Give a full URL starting with http:// or https://");
-    return askWeb(`Visit this exact page and report its main content in detail: key facts, numbers, names and dates. Don't add anything that isn't on the page.\n\nURL: ${url}`, ctx.signal, host);
+    const page = await readPage(url, ctx.signal);
+    if (!page) {
+      const summary = await askWeb(`Visit this exact page and report its main content in detail: key facts, numbers, names and dates. Don't add anything that isn't on the page.\n\nURL: ${url}`, ctx.signal, host);
+      return summary + "\n\n(The page couldn't be loaded directly, so this is a search model's report of it, not the exact text.)";
+    }
+    const total = page.text.length;
+    const from = Math.max(0, Math.min(Number(start) || 0, total));
+    const part = page.text.slice(from, from + PAGE_CHUNK);
+    const to = from + part.length;
+    let head = `Text of ${url} (read with ${page.how})`;
+    if (from > 0 || to < total) head += `, characters ${from}-${to} of ${total}`;
+    head += to < total ? `. More follows: call fetch_webpage with start=${to} to read on.` : ".";
+    return `${head}\n\n${part}`;
   },
   async calculator({ expression }) { return calculate(expression); },
   async run_python({ code }, ctx) {
@@ -807,7 +908,7 @@ const TOOL_FUNCTIONS = {
     const r = await python.run(code, python.warmed ? 90000 : 240000, ctx.onProgress);
     if (!r.ok) return "Error: " + r.error;
     python.warmed = true;
-    const { changed, removed } = syncFromPython(r.files);
+    const { changed, removed } = syncFromPython(r.files, r.sent);
     let out = `exit code: ${r.exit}\nstdout:\n${r.out}\nstderr:\n${r.err}`;
     if (changed.length) out += `\nFiles created or updated (shown to the user automatically): ${changed.map((p) => `${p} (${humanSize(files.get(p).bytes.length)})`).join(", ")}`;
     if (removed.length) out += `\nFiles deleted: ${removed.join(", ")}`;
@@ -848,6 +949,29 @@ const TOOL_FUNCTIONS = {
     const size = shot.width ? `${shot.width}×${shot.height}px${shot.cropped ? ", cut off at the bottom because the page is very long" : ""}` : "full page";
     return `Screenshot of ${label} (${size}).\nWhat the vision model (${visionModel()}) saw:\n${seen}`;
   },
+  async update_plan({ steps }, ctx) {
+    if (!Array.isArray(steps) || !steps.length) throw new Error("steps must be a list like [{\"text\": \"Search for rates\", \"status\": \"active\"}]");
+    const ok = new Set(["pending", "active", "done", "skipped"]);
+    const plan = steps.slice(0, 12).map((x) => (typeof x === "string" ? { text: x, status: "pending" } : x))
+      .map((x) => ({ text: String(x.text || x.step || "").trim().slice(0, 120), status: ok.has(x.status) ? x.status : x.status === "in_progress" ? "active" : x.status === "completed" ? "done" : "pending" }))
+      .filter((x) => x.text);
+    if (ctx.view && ctx.view.plan) ctx.view.plan(plan);
+    const done = plan.filter((x) => x.status === "done").length;
+    return `Plan updated: ${done} of ${plan.length} steps done. Keep it current as you work.`;
+  },
+  async remember({ fact }) {
+    if (!state.settings.memory) return "Memory is turned off in Settings, so nothing was saved.";
+    return memory.add(fact) ? `Saved to memory: ${String(fact).trim()}` : "Already in memory.";
+  },
+  async forget({ fact }) {
+    const gone = memory.forget(fact);
+    return gone.length ? `Removed from memory: ${gone.join("; ")}` : "Nothing in memory matched that.";
+  },
+  async delegate({ task }, ctx) {
+    if (!task || String(task).trim().length < 10) throw new Error("task is required: a complete, self-contained description of the work");
+    if (!ctx.spawn) throw new Error("Helpers can't start their own helpers. Do this part yourself.");
+    return ctx.spawn(String(task).trim(), ctx.signal);
+  },
   async get_current_time() {
     return new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short" }) +
       ` (${Intl.DateTimeFormat().resolvedOptions().timeZone})`;
@@ -860,8 +984,9 @@ const tool = (name, description, properties = {}, required = []) =>
 const TOOLS = [
   tool("web_search", "Search the web. Use for anything current, factual, or that you are unsure about.",
     { query: { type: "string" } }, ["query"]),
-  tool("fetch_webpage", "Read a specific web page by URL. Use after web_search when you need the details of one page.",
-    { url: { type: "string" } }, ["url"]),
+  tool("fetch_webpage", "Read the actual text of a web page by URL. Use after web_search when you need the exact details of one page. " +
+    "Long pages come in parts of about 8,000 characters: the result says which start= to pass to read on.",
+    { url: { type: "string" }, start: { type: "integer", description: "Character to start from, for long pages (default 0)" } }, ["url"]),
   tool("calculator", "Exact arithmetic, e.g. '125000 * 0.18' or 'round(sqrt(2), 3)'. Use instead of doing maths in your head.",
     { expression: { type: "string" } }, ["expression"]),
   tool("run_python", "Run Python 3 in the user's browser (no internet). Use it for calculations, data work, and to CREATE FILES: " +
@@ -878,7 +1003,24 @@ const TOOLS = [
     "page: PDF page or Excel sheet number (default 1). Use it to verify visual files before finishing, and to see what a web page looks like.",
     { target: { type: "string" }, question: { type: "string" }, page: { type: "integer" } }, ["target", "question"]),
   tool("get_current_time", "Get the user's current local date and time."),
+  tool("update_plan", "Show the user your plan for a multi-step job as a live checklist. Call it before starting a job of 3 or more steps, " +
+    "then again whenever a step starts (status active) or finishes (done), or the plan changes. Send the whole list every time.",
+    { steps: { type: "array", items: { type: "object", properties: { text: { type: "string" }, status: { type: "string", enum: ["pending", "active", "done", "skipped"] } }, required: ["text", "status"] } } }, ["steps"]),
+  tool("delegate", "Hand one self-contained part of a bigger job to a helper agent. Call it several times in ONE reply and the helpers work at the same time. " +
+    "The helper can search, read pages, calculate, run Python and make files, but can't see this conversation: put everything it needs in task " +
+    "(what to find or make, file names, format, numbers to use). It replies with a report. Use only for independent parts that each take several steps.",
+    { task: { type: "string" } }, ["task"]),
+  tool("remember", "Save one short, lasting fact the user told you about themselves (name, business, city, preferences for how you work) " +
+    "so you know it in future chats. Never save passwords, keys, card, bank or ID numbers, or health details.",
+    { fact: { type: "string" } }, ["fact"]),
+  tool("forget", "Remove something from memory when the user asks you to forget it.", { fact: { type: "string" } }, ["fact"]),
 ];
+// Who gets which tools
+const MEMORY_TOOLS = new Set(["remember", "forget"]);
+const leadTools = () => TOOLS.filter((t) => state.settings.memory || !MEMORY_TOOLS.has(t.function.name));
+const HELPER_TOOLS = TOOLS.filter((t) => !["delegate", "update_plan", "remember", "forget"].includes(t.function.name));
+// lookups that can safely run at the same time (they don't change files)
+const PARALLEL_SAFE = new Set(["web_search", "fetch_webpage", "calculator", "read_file", "list_files", "get_current_time", "delegate"]);
 
 async function executeTool(name, rawArgs, ctx) {
   const fn = TOOL_FUNCTIONS[name];
@@ -891,7 +1033,7 @@ async function executeTool(name, rawArgs, ctx) {
     return `Error: could not read tool arguments (${e.message}). Send valid JSON.`;
   }
   try {
-    return truncate(await fn(args, ctx));
+    return truncate(await fn(args, ctx), name === "fetch_webpage" ? PAGE_CHUNK + 800 : name === "delegate" ? 9000 : MAX_TOOL_OUTPUT);
   } catch (e) {
     if (e.name === "AbortError") throw e;
     return `Error while running ${name}: ${e.message}`;
@@ -915,7 +1057,11 @@ function describe(name, args, done) {
   const a = args || {};
   switch (name) {
     case "web_search": return `${done ? "Searched" : "Searching"} the web for ${quote(a.query)}`;
-    case "fetch_webpage": return `${done ? "Read" : "Reading"} ${hostOf(a.url)}`;
+    case "fetch_webpage": return `${done ? "Read" : "Reading"} ${hostOf(a.url)}${a.start ? " (continued)" : ""}`;
+    case "update_plan": return done ? "Updated the plan" : "Updating the plan";
+    case "remember": return done ? `Remembered ${quote(a.fact, 70)}` : "Saving to memory";
+    case "forget": return done ? `Forgot ${quote(a.fact, 70)}` : "Removing from memory";
+    case "delegate": return done ? `A helper finished ${quote(a.task, 70)}` : `Handing ${quote(a.task, 60)} to a helper`;
     case "calculator": return `${done ? "Calculated" : "Calculating"} ${String(a.expression || "").slice(0, 60)}`;
     case "run_python": {
       const names = filesInCode(a.code);
@@ -980,6 +1126,9 @@ function describeForming(name, raw) {
       if (q) return `Deciding what to check: ${quote(q, 70)}`;
       return t ? `Getting ready to look at ${/^https?:/i.test(t) ? hostOf(t) : t}` : "Getting ready to take a screenshot";
     }
+    case "update_plan": return "Writing a plan";
+    case "delegate": { const t = partialField(raw, "task"); return t ? `Briefing a helper: ${quote(t, 60)}` : "Briefing a helper"; }
+    case "remember": return "Noting something to remember";
     default: return `Preparing ${name.replace(/_/g, " ")}`;
   }
 }
@@ -991,6 +1140,7 @@ function stepDetail(name, args, result) {
   if (name === "screenshot") return `Asked: ${args.question || "(no question)"}\n\n${result}`;
   if (name === "run_python") return `${args.code || ""}\n\n— Output —\n${result}`;
   if (name === "calculator") return `${args.expression} = ${result}`;
+  if (name === "delegate") return `Task: ${args.task || ""}\n\n— Report —\n${result}`;
   if (name === "write_file") return result;
   return result;
 }
@@ -1002,6 +1152,17 @@ const fmtDuration = (ms) => {
 // ---------------------------------------------------------------------------
 // System prompt + context management
 // ---------------------------------------------------------------------------
+function memorySection() {
+  if (!state.settings.memory) return "";
+  const facts = memory.items.map((m) => `- ${m.text}`).join("\n");
+  return `
+Memory:
+- When the user tells you something lasting about themselves (name, business, city, how they like answers), save it with remember in one short line, in their words. Don't save one-off task details. Never save passwords, keys, card, bank or ID numbers, or health details.
+- If they ask you to forget something, use forget. If they ask what you remember, list it.
+${facts ? `- What you already know about the user from earlier chats:\n${facts}` : "- You don't know anything about the user yet."}
+`;
+}
+
 function systemPrompt() {
   const now = new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short" });
   return `You are Mini Agent, a capable assistant that completes tasks by working in a loop: think about the next step, use a tool, look at the result, and repeat until the task is truly done.
@@ -1013,7 +1174,21 @@ How to work:
 - For any number that matters, use calculator or run_python. Never do important maths in your head.
 - If a tool returns an error, read it, fix your approach, and try again. Don't repeat the exact same failing call.
 - Ask the user a question only when you truly cannot proceed without their input.
+- You can take up to ${MAX_STEPS} steps per request, so finish big jobs properly. In long jobs, older tool output may be shortened and older messages summarised to save space; re-read a file or page if you need its details again.
 
+Planning:
+- For any job with 3 or more steps, call update_plan first with a short plan (3 to 8 steps, plain words). Mark each step active when you start it and done when it's finished, and change the plan if you learn something new. The user watches this checklist.
+- Skip the plan for simple questions and quick lookups.
+
+Helpers and parallel work:
+- When you need several independent lookups, ask for all of them in one reply (for example three web_search calls at once). They run at the same time.
+- For a big job with independent parts (researching several companies, making separate files), call delegate once per part in the same reply, so helper agents work on them at the same time. Give each one a complete, self-contained task. Then combine their reports yourself and check the result.
+- Don't delegate small or sequential steps; do those yourself.
+
+Files the user attaches:
+- They're in your workspace under their own names (list_files shows them). Open them with run_python: pypdf for PDFs, python-docx for Word, openpyxl or pandas for Excel and CSV, python-pptx for PowerPoint.
+- To see an image, a photo or a scanned page, use screenshot on the file with a specific question. Use page= for a PDF page.
+${memorySection()}
 Making files (the user can preview, download and share them):
 - You can make real files: Excel (.xlsx), Word (.docx), PDF, PowerPoint (.pptx), charts and images (.png), CSV, Markdown, HTML, JSON, code and ZIP.
 - Build binary files with run_python and save them in the current folder with short, descriptive names (e.g. "gst_summary.xlsx"). Text files can also use write_file.
@@ -1021,6 +1196,7 @@ Making files (the user can preview, download and share them):
 - For fpdf2 PDFs, use the provided Unicode font so symbols like ₹ work: pdf.add_font("DejaVu", "", FONT_REGULAR); pdf.add_font("DejaVu", "B", FONT_BOLD); pdf.set_font("DejaVu", size=11).
 - Python has no internet access. Get any data you need with web_search first, then put it in the code.
 - After making a file, check it (reopen it in Python and print a short summary) before finishing.
+- fetch_webpage gives the page's real text. Read the parts you need instead of guessing from search snippets.
 - Files appear to the user automatically, so don't paste their contents into your answer. Name each file and say in a line what's in it.
 - The user is usually on a phone. HTML files (games, pages, tools) open and run right inside this app when the user taps the file card, so say "tap the file to open it", not "double-click" or "drag into a browser". Make HTML pages work with touch and fit a phone screen.
 
@@ -1033,13 +1209,79 @@ Checking your work with screenshots:
 When finished, give a clear, concise final answer in Markdown. Briefly say what you checked, and list source URLs if you used the web.`;
 }
 
-function trimHistory() {
-  const size = () => state.history.reduce((n, m) => n + JSON.stringify(m).length, 0);
-  while (size() > MAX_HISTORY_CHARS) {
-    const userIdx = state.history.map((m, i) => (m.role === "user" ? i : -1)).filter((i) => i >= 0);
-    if (userIdx.length < 2) break;
-    state.history.splice(userIdx[0], userIdx[1] - userIdx[0]);
+const SHORT_MARK = "\n…(older output shortened to save space)";
+const SUMMARY_MARK = "[Summary of the earlier part of this chat, written to save space]\n";
+const msgSize = (msgs) => msgs.reduce((n, m) => n + JSON.stringify(m).length, 0);
+const isRealUser = (m) => m.role === "user" && typeof m.content === "string" && !/^\[(harness note|Debate)/.test(m.content);
+
+// Every tool call needs an answer before the model is asked again. If a request was stopped part-way,
+// fill the gaps (and drop stray answers), so the next message doesn't fail.
+function repairToolPairs(msgs) {
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.role === "tool") {
+      const owner = msgs.slice(0, i).reverse().find((x) => x.role !== "tool");
+      if (!owner || !owner.tool_calls || !owner.tool_calls.some((tc) => tc.id === m.tool_call_id)) { msgs.splice(i, 1); i--; }
+      continue;
+    }
+    if (m.role !== "assistant" || !m.tool_calls || !m.tool_calls.length) continue;
+    let j = i + 1;
+    const answered = new Set();
+    while (j < msgs.length && msgs[j].role === "tool") answered.add(msgs[j++].tool_call_id);
+    const missing = m.tool_calls.filter((tc) => !answered.has(tc.id))
+      .map((tc) => ({ role: "tool", tool_call_id: tc.id, content: "(Not run: the request was stopped before this finished.)" }));
+    if (missing.length) msgs.splice(j, 0, ...missing);
   }
+}
+
+async function summarise(old, signal) {
+  const lines = [];
+  for (const m of old) {
+    if (m.role === "user") lines.push(`USER: ${truncate(m.content || "", 3000)}`);
+    else if (m.role === "assistant") {
+      if (m.content) lines.push(`ASSISTANT: ${truncate(m.content, 3000)}`);
+      for (const tc of m.tool_calls || []) lines.push(`  (used ${tc.function.name}: ${truncate(tc.function.arguments || "", 300)})`);
+    } else if (m.role === "tool") lines.push(`  (result: ${truncate(m.content || "", 500)})`);
+  }
+  const data = await callLLM({
+    model: currentModel(),
+    messages: [
+      { role: "system", content: "You compress a chat between a user and an AI agent so the agent can keep working without the full history. Write a compact summary in plain text: what the user asked for and their preferences, decisions made, key facts and numbers found (with sources), files made (exact names and contents in brief), and anything left unfinished. Keep exact numbers, names and file names. Under 400 words." },
+      { role: "user", content: truncate(lines.join("\n"), 40000) },
+    ],
+    temperature: 0.2, max_tokens: 3000,
+  }, signal);
+  return String(data.choices[0].message.content || "").trim();
+}
+
+// Keep what the model sees within CONTEXT_CHARS: first shorten old tool output, then summarise older turns.
+async function compactContext(msgs, view, signal) {
+  repairToolPairs(msgs);
+  if (msgSize(msgs) <= CONTEXT_CHARS) return;
+  for (let i = 0; i < msgs.length - 8; i++) {
+    const m = msgs[i];
+    if (m.role === "tool" && typeof m.content === "string" && m.content.length > 1500 && !m.content.endsWith(SHORT_MARK)) {
+      m.content = m.content.slice(0, 1200) + SHORT_MARK;
+    }
+    if (m.role === "assistant" && m.tool_calls) {
+      for (const tc of m.tool_calls) {
+        if ((tc.function.arguments || "").length <= 2500) continue;
+        const a = parseArgs(tc.function.arguments);
+        for (const k of Object.keys(a)) if (typeof a[k] === "string" && a[k].length > 1500) a[k] = a[k].slice(0, 1200) + "\n# …(shortened to save space)";
+        tc.function.arguments = JSON.stringify(a);
+      }
+    }
+  }
+  if (msgSize(msgs) <= CONTEXT_CHARS) return;
+  const turns = msgs.map((m, i) => (isRealUser(m) ? i : -1)).filter((i) => i >= 0);
+  if (turns.length < 3) return;                 // only the current and previous request: nothing old enough
+  const cut = turns[turns.length - 2];          // keep the previous request and this one in full
+  view.progress("Summarising the earlier conversation to make room");
+  let summary = "";
+  try { summary = await summarise(msgs.slice(0, cut), signal); } catch (e) { if (e.name === "AbortError") throw e; }
+  msgs.splice(0, cut, ...(summary ? [{ role: "user", content: SUMMARY_MARK + summary }] : []));
+  view.addStep(summary ? { icon: "note", label: "Summarised the earlier conversation to make room", detail: summary }
+    : { icon: "note", label: "Set aside the oldest messages to make room" });
 }
 
 // ---------------------------------------------------------------------------
@@ -1047,14 +1289,16 @@ function trimHistory() {
 // ---------------------------------------------------------------------------
 // One agent working until it has an answer: think, use tools, look at the results, repeat.
 // msgs is the conversation it sees (it adds its own tool calls and final answer to it).
-// opts: system prompt, tools it may use, quiet (don't show its text as the answer yet: a draft
-// during a debate), who (name shown on its steps when two AIs are working).
+// opts: system prompt (text, or a function so memory changes show up mid-job), tools it may use,
+// quiet (don't show its text as the answer yet: a draft, or a helper's report), who (name on its steps),
+// compact (keep the conversation within CONTEXT_CHARS), spawn (starts a helper agent), maxSteps.
 // Returns its final text, or null if it ran out of steps.
 async function agentLoop(msgs, view, signal, opts) {
-  const { system, tools = TOOLS, quiet = false, who = "" } = opts;
+  const { system, tools = TOOLS, quiet = false, who = "", compact = false, spawn = null, maxSteps = MAX_STEPS } = opts;
   const tag = (label) => (who ? `${who}: ${label}` : label);
   let badCalls = 0;
-  for (let step = 1; step <= MAX_STEPS; step++) {
+  for (let step = 1; step <= maxSteps; step++) {
+    if (compact) await compactContext(msgs, view, signal); else repairToolPairs(msgs);
     // THINK (streamed, so the status can show what's actually going on)
     const thinkStart = Date.now();
     view.waiting(currentModel());
@@ -1062,7 +1306,7 @@ async function agentLoop(msgs, view, signal, opts) {
     try {
       msg = await streamLLM({
         model: currentModel(),
-        messages: [{ role: "system", content: system }, ...msgs],
+        messages: [{ role: "system", content: typeof system === "function" ? system() : system }, ...msgs],
         tools, tool_choice: "auto", temperature: 0.3,
       }, signal, {
         reasoning: (chunk, all) => view.thinking(all, chunk.length),
@@ -1098,21 +1342,34 @@ async function agentLoop(msgs, view, signal, opts) {
         })),
       });
       const allowed = new Set(tools.map((t) => t.function.name));
-      for (const tc of msg.tool_calls) {
+      const runOne = async (tc, together) => {
         const name = tc.function.name;
         const args = parseArgs(tc.function.arguments);
-        view.running(name, args);
+        if (!together && name !== "update_plan") view.running(name, args);
         let image = null;
         const result = allowed.has(name)
           ? await executeTool(name, tc.function.arguments, {
-            signal,
-            onProgress: (p) => view.progress(p === "Running Python" ? describe(name, args, false) : p),
+            signal, view, spawn,
+            onProgress: (p) => { if (!together) view.progress(p === "Running Python" ? describe(name, args, false) : p); },
             onImage: (src) => { image = src; view.peek(src); },
           })
           : `Error: you can't use ${name} here. Available: ${[...allowed].join(", ")}`;
         const failed = /^Error/.test(result) || /exit code: 1/.test(result);
-        view.addStep({ icon: name, label: tag(describe(name, args, true) + (failed ? " (hit an error)" : "")), detail: stepDetail(name, args, result), image });
-        msgs.push({ role: "tool", tool_call_id: tc.id, content: result });
+        if (name !== "update_plan" || failed) {
+          view.addStep({ icon: name, label: tag(describe(name, args, true) + (failed ? " (hit an error)" : "")), detail: stepDetail(name, args, result), image });
+        }
+        return { role: "tool", tool_call_id: tc.id, content: result };
+      };
+      // independent lookups (and helpers) run at the same time; anything that changes files runs on its own
+      const calls = msg.tool_calls;
+      for (let i = 0; i < calls.length;) {
+        let j = i;
+        if (PARALLEL_SAFE.has(calls[i].function.name)) while (j + 1 < calls.length && PARALLEL_SAFE.has(calls[j + 1].function.name)) j++;
+        const group = calls.slice(i, j + 1);
+        if (group.length > 1) view.together(group.map((tc) => [tc.function.name, parseArgs(tc.function.arguments)]));
+        const results = await Promise.all(group.map((tc) => runOne(tc, group.length > 1)));
+        msgs.push(...results);
+        i = j + 1;
       }
       continue;
     }
@@ -1122,6 +1379,17 @@ async function agentLoop(msgs, view, signal, opts) {
     return msg.content || "";
   }
   return null;
+}
+
+// Helper agents run at most 3 at a time (free tiers have tight rate limits).
+const helperSlots = { free: 3, waiting: [] };
+async function withHelperSlot(fn) {
+  if (helperSlots.free > 0) helperSlots.free--;
+  else await new Promise((r) => helperSlots.waiting.push(r));
+  try { return await fn(); } finally {
+    const next = helperSlots.waiting.shift();
+    if (next) next(); else helperSlots.free++;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1177,7 +1445,8 @@ function readVerdict(review) {
   return { agreed, body: body || String(review).trim(), points };
 }
 
-async function debate({ question, draft, turnStart, madeFiles, view, signal }) {
+async function debate({ question, draft, turnMsg, madeFiles, view, signal }) {
+  const turnStart = state.history.indexOf(turnMsg) + 1;
   const leadId = state.settings.provider, revId = otherProvider();
   const L = PROVIDERS[leadId].name, R = PROVIDERS[revId].name;
   const short = (m) => m.split("/").pop();
@@ -1231,7 +1500,7 @@ async function debate({ question, draft, turnStart, madeFiles, view, signal }) {
       (last ? `\n\nThis is the last round. If you still disagree with ${R} on something important, add one short line at the end of the answer telling the user what you two disagree on.` : "") });
     let revised;
     try {
-      revised = await agentLoop(leadMsgs, view, signal, { system: systemPrompt(), tools: TOOLS, quiet: true, who: L });
+      revised = await agentLoop(leadMsgs, view, signal, { system: systemPrompt, tools: leadTools(), quiet: true, who: L, spawn: debate.spawn });
     } catch (e) {
       if (e.name === "AbortError") throw e;
       view.addStep({ icon: "alert", label: `${L} couldn't revise the answer, so the earlier one stands`, detail: e.message });
@@ -1252,12 +1521,16 @@ async function debate({ question, draft, turnStart, madeFiles, view, signal }) {
   return result;
 }
 
-// One request from the user, start to finish.
-async function runTurn(text) {
-  trimHistory();
-  state.history.push({ role: "user", content: text });
-  const turnStart = state.history.length;
-  const userEntry = { kind: "user", text };
+// One request from the user, start to finish. attached = names of files the user attached to it.
+async function runTurn(text, attached = []) {
+  const note = attached.length
+    ? `\n\n[The user attached ${attached.length === 1 ? "a file" : `${attached.length} files`}: ` +
+      attached.map((p) => `${p} (${fileInfo(p).label}${files.has(p) ? `, ${humanSize(files.get(p).bytes.length)}` : ""})`).join(", ") +
+      ". They're in your workspace.]"
+    : "";
+  const turnMsg = { role: "user", content: (text || "Please look at the attached file" + (attached.length > 1 ? "s." : ".")) + note };
+  state.history.push(turnMsg);
+  const userEntry = { kind: "user", text, files: attached.length ? attached : undefined };
   state.log.push(userEntry);
   renderEntry(userEntry, true);
 
@@ -1274,6 +1547,19 @@ async function runTurn(text) {
   const signal = state.abort.signal;
   setRunningUI(true);
 
+  // helpers: each gets its own conversation and a numbered name on its steps
+  let helpers = 0;
+  const spawn = (task, sig) => withHelperSlot(async () => {
+    const label = `Helper ${++helpers}`;
+    const hv = helperView(view, label);
+    hv.progress(`Starting: ${thoughtSnippet(task, 60)}`);
+    const msgs = [{ role: "user", content: task }];
+    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: HELPER_TOOLS, quiet: true, who: label, compact: true, maxSteps: HELPER_STEPS });
+    if (report === null) return `${label} ran out of steps before finishing. What it had so far:\n${workSummary(msgs, 4000)}`;
+    return report || `${label} finished without writing a report.`;
+  });
+  debate.spawn = spawn;
+
   const finish = async (patch) => {
     Object.assign(turn, patch);
     turn.ms = Date.now() - started;
@@ -1283,7 +1569,7 @@ async function runTurn(text) {
 
   try {
     if (debating) view.speaker(provider().name);
-    let answer = await agentLoop(state.history, view, signal, { system: systemPrompt(), tools: TOOLS, quiet: debating, who: "" });
+    let answer = await agentLoop(state.history, view, signal, { system: systemPrompt, tools: leadTools(), quiet: debating, compact: true, spawn });
     if (answer === null) {
       state.history.push({ role: "assistant", content: `I stopped after ${MAX_STEPS} steps without finishing.` });
       await finish({ text: `I stopped after ${MAX_STEPS} steps without finishing. Say "continue" to let me keep going.` });
@@ -1292,7 +1578,7 @@ async function runTurn(text) {
     let debated = null;
     if (debating) {
       view.addStep({ icon: "note", label: `${provider().name} drafted an answer`, detail: answer });
-      debated = await debate({ question: text, draft: answer, turnStart, madeFiles: changedFiles(), view, signal });
+      debated = await debate({ question: text || turnMsg.content, draft: answer, turnMsg, madeFiles: changedFiles(), view, signal });
       answer = debated.text;
       state.history[state.history.length - 1] = { role: "assistant", content: answer };   // the agreed answer is what's remembered
       view.writingFinal();
@@ -1301,12 +1587,14 @@ async function runTurn(text) {
   } catch (e) {
     state.speaker = null;
     if (e.name === "AbortError") {
+      repairToolPairs(state.history);
       const partial = view.partialAnswer();
       state.history.push({ role: "assistant", content: partial ? partial + "\n\n(The user stopped this reply.)" : "(The user stopped this request.)" });
       await finish({ text: partial, stopped: true });
     } else {
-      state.history.splice(turnStart - 1);   // forget the failed attempt, so "Try again" starts clean
-      await finish({ kind: "error", text: e.message, retry: text });
+      const at = state.history.indexOf(turnMsg);
+      if (at >= 0) state.history.splice(at);   // forget the failed attempt, so "Try again" starts clean
+      await finish({ kind: "error", text: e.message, retry: text, retryFiles: attached.length ? attached : undefined });
     }
   } finally {
     state.speaker = null;
@@ -1317,6 +1605,30 @@ async function runTurn(text) {
     save.chat();
     renderChatList();
   }
+}
+
+// What a helper's work looks like on the shared status line: "Helper 2: Searching the web for …"
+function helperView(parent, label) {
+  let last = "";
+  const say = (t) => parent.progress(`${label}: ${t}`);
+  return {
+    waiting() {}, speaker() {}, writingFinal() {}, dropAnswer() {}, plan() {},
+    thinking(all, chars) {
+      parent.feed(chars);
+      const s = thoughtSnippet(all.replace(/[^.!?:;\n]*$/, ""), 70);
+      if (s && s.length >= 16 && s !== last) { last = s; say(s); }
+    },
+    forming(name, raw) { parent.feed(6); if (name !== "update_plan") { const t = describeForming(name, raw); if (t !== last) { last = t; say(t); } } },
+    running(name, args) { say(describe(name, args, false)); },
+    together(items) { say(`doing ${items.length} things at once`); },
+    progress(t) { say(t); },
+    drafting(chars) { parent.feed(chars); },
+    answer(all, chars) { parent.feed(chars); },
+    peek(src) { parent.peek(src); },
+    addStep(step) { parent.addStep(step); },
+    feed(chars) { parent.feed(chars); },
+    partialAnswer() { return ""; },
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1348,6 +1660,12 @@ const ICONS = {
   get_current_time: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM12 7v5l3 2",
   screenshot: "M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
   debate: "M3 5h12v8H8l-4 3V13H3zM18 9h3v8h-1v3l-4-3h-5v-1",
+  update_plan: "M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2",
+  delegate: "M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M17 11a2.5 2.5 0 1 0 0-5M18 14c2 .6 3.5 2.6 3.5 5",
+  remember: "M6 3h12v18l-6-4-6 4z",
+  forget: "M6 3h12v18l-6-4-6 4zM9 9l6 6M15 9l-6 6",
+  attach: "M20 11.5 12.4 19a5 5 0 0 1-7.1-7.1l8.1-8.1a3.4 3.4 0 0 1 4.8 4.8l-8.2 8.1a1.7 1.7 0 0 1-2.4-2.4l7.5-7.5",
+  close: "M7 7l10 10M17 7 7 17",
   chevron: "M9 6l6 6-6 6",
   alert: "M12 4 2.5 20h19ZM12 10v4M12 17h.01",
   share: "M12 3v12M8 7l4-4 4 4M5 12v8h14v-8",
@@ -1400,6 +1718,9 @@ const ui = {
   send: document.getElementById("sendBtn"),
   subtitle: document.getElementById("subtitle"),
   version: document.getElementById("version"),
+  attachBtn: document.getElementById("attachBtn"),
+  fileInput: document.getElementById("fileInput"),
+  attachRow: document.getElementById("attachRow"),
 };
 const nearBottom = () => ui.chat.scrollHeight - ui.chat.scrollTop - ui.chat.clientHeight < 160;
 const scrollDown = (force) => { if (force || nearBottom()) ui.chat.scrollTop = ui.chat.scrollHeight; };
@@ -1635,14 +1956,28 @@ function workedLabel(turn) {
   const extra = !d || !d.rounds ? "" : d.agreed ? (d.rounds === 1 ? `, ${d.with} agreed` : `, agreed after ${d.rounds} rounds`) : `, debated ${d.rounds} round${d.rounds === 1 ? "" : "s"}`;
   return `Worked for ${fmtDuration(turn.ms)}${extra}`;
 }
+// The agent's plan as a checklist. Live while it works; afterwards it sits at the top of the steps.
+function planNode(plan) {
+  const done = plan.filter((x) => x.status === "done").length;
+  const marks = { done: "✓", active: "", pending: "", skipped: "–" };
+  return el("div", { class: "plan" },
+    el("div", { class: "plan-head" }, el("span", {}, "Plan"), el("span", { class: "plan-count" }, `${done} of ${plan.length} done`)),
+    el("ol", { class: "plan-list" }, ...plan.map((x) => el("li", { class: `plan-item is-${x.status}` },
+      el("span", { class: "plan-mark", "aria-hidden": "true" }, marks[x.status] || ""),
+      el("span", { class: "plan-text" }, x.text),
+      el("span", { class: "sr-only" }, ` (${x.status})`)))));
+}
+
 function activityNode(turn) {
-  if (!turn.steps || !turn.steps.length) return null;
-  const onlyThought = turn.steps.length === 1 && (turn.steps[0].icon === "think");
+  if ((!turn.steps || !turn.steps.length) && !turn.plan) return null;
+  const onlyThought = !turn.plan && turn.steps.length === 1 && (turn.steps[0].icon === "think");
+  const n = (turn.steps || []).length;
   const label = onlyThought ? turn.steps[0].label
-    : turn.ms ? workedLabel(turn) : `${turn.steps.length} step${turn.steps.length === 1 ? "" : "s"}`;   // older chats have no timing
+    : turn.ms ? workedLabel(turn) : `${n} step${n === 1 ? "" : "s"}`;   // older chats have no timing
   return el("details", { class: "activity" },
     el("summary", {}, el("span", { class: "activity-label" }, label), icon("chevron", "ico chev")),
-    stepsList(turn.steps));
+    turn.plan ? planNode(turn.plan) : null,
+    stepsList(turn.steps || []));
 }
 
 function fileCard(path) {
@@ -1685,7 +2020,9 @@ function leaveEmpty() {
 function renderEntry(entry, animate = false) {
   if (animate) leaveEmpty(); else document.querySelector(".empty")?.remove();
   if (entry.kind === "user") {
-    ui.thread.append(el("div", { class: "row user" + (animate && !reduceMotion ? " bubble-in" : "") }, el("div", { class: "bubble" }, entry.text)));
+    ui.thread.append(el("div", { class: "row user" + (animate && !reduceMotion ? " bubble-in" : "") },
+      entry.files && entry.files.length ? el("div", { class: "bubble-files" }, ...entry.files.map((p) => attachChip(p, false))) : null,
+      entry.text ? el("div", { class: "bubble" }, entry.text) : null));
     scrollDown(true);
     return;
   }
@@ -1695,7 +2032,7 @@ function renderEntry(entry, animate = false) {
   if (entry.kind === "error") {
     turn.append(el("div", { class: "error", role: "alert" }, icon("alert", "ico err-ico"),
       el("div", {}, el("p", {}, entry.text),
-        entry.retry ? el("button", { class: "text-btn", type: "button", onclick: () => submit(entry.retry) }, "Try again") : null)));
+        entry.retry || entry.retryFiles ? el("button", { class: "text-btn", type: "button", onclick: () => submit(entry.retry, entry.retryFiles) }, "Try again") : null)));
   } else if (entry.stopped) {
     turn.append(el("p", { class: "muted" }, "Stopped."));
   } else if (entry.text) {
@@ -1729,8 +2066,30 @@ function liveTurn(turn) {
   const setStatus = (text, key, hold, force, maxWait) => { ticker.set(text, key, hold, force, maxWait); scrollDown(); };
   const addStepRow = (s) => steps.append(stepRow(s, reduceMotion ? "" : " step-in"));
   let peekEl = null;
+  let planEl = null;
 
   return {
+    feed(chars) { loader.feed(chars); },
+    plan(items) {                        // the agent's checklist, updated as it works
+      turn.plan = items;
+      const node = planNode(items);
+      if (!reduceMotion && !planEl) node.classList.add("rise-in");
+      if (planEl) planEl.replaceWith(node); else live.after(node);
+      planEl = node;
+      loader.step();
+      scrollDown();
+    },
+    together(items) {                    // several tools at once
+      phase = "running";
+      const names = items.map(([n]) => n);
+      loader.mood(names.every((n) => PULL_TOOLS.has(n)) ? "pull" : "make");
+      const all = (n) => names.every((x) => x === n);
+      const text = all("delegate") ? `${items.length} helpers are working at the same time`
+        : all("web_search") ? `Running ${items.length} searches at once`
+        : all("fetch_webpage") ? `Reading ${items.length} pages at once: ${listNames(items.map(([, a]) => hostOf(a.url)))}`
+        : `Doing ${items.length} things at once`;
+      setStatus(text, "together:" + text, 900, true);
+    },
     waiting(model) {
       phase = "waiting"; thoughtShown = "";
       loader.mood("waiting");
@@ -1800,6 +2159,7 @@ function liveTurn(turn) {
     },
     async finish() {
       if (peekEl) { peekEl.remove(); peekEl = null; }
+      if (planEl) { live.insertBefore(planEl, steps); planEl.classList.remove("rise-in"); }   // the plan folds into the steps
       // 1) let the answer finish flowing in
       if (turn.kind !== "error" && turn.text) {
         streamer.set(turn.text);
@@ -1809,8 +2169,8 @@ function liveTurn(turn) {
       const onlyThought = turn.steps.length === 1 && turn.steps[0].icon === "think";
       const label = turn.kind === "error" ? (turn.steps.length ? `Worked for ${fmtDuration(turn.ms)}` : "")
         : turn.stopped ? "Stopped"
-        : !turn.steps.length ? ""
-        : onlyThought ? turn.steps[0].label : workedLabel(turn);
+        : !turn.steps.length && !turn.plan ? ""
+        : onlyThought && !turn.plan ? turn.steps[0].label : workedLabel(turn);
       speakerTag.remove();
       const spin = loader.spinDown();
       if (label) ticker.set(label, "final", 0, true);
@@ -1831,7 +2191,7 @@ function liveTurn(turn) {
       if (turn.kind === "error") {
         answerBox.replaceWith(el("div", { class: "error" + (reduceMotion ? "" : " fade-in"), role: "alert" }, icon("alert", "ico err-ico"),
           el("div", {}, el("p", {}, turn.text),
-            turn.retry ? el("button", { class: "text-btn", type: "button", onclick: () => submit(turn.retry) }, "Try again") : null)));
+            turn.retry || turn.retryFiles ? el("button", { class: "text-btn", type: "button", onclick: () => submit(turn.retry, turn.retryFiles) }, "Try again") : null)));
       } else if (turn.text) {
         answerBox.innerHTML = mdHTML(turn.text);
         wireFiles(answerBox);
@@ -1903,7 +2263,7 @@ function setRunningUI(running) {
   updateSendState();
 }
 function updateSendState() {
-  ui.send.disabled = !state.running && !ui.input.value.trim();
+  ui.send.disabled = !state.running && !ui.input.value.trim() && !state.pending.length;
 }
 function updateSubtitle() {
   ui.version.textContent = "v" + APP_VERSION;
@@ -2097,22 +2457,98 @@ previewDlg.addEventListener("click", (e) => { if (e.target === previewDlg) previ
 // ---------------------------------------------------------------------------
 // Composer
 // ---------------------------------------------------------------------------
-function submit(text) {
+// A new conversation becomes a saved chat on its first message (or first attachment).
+function ensureChat(firstText) {
+  if (state.chat) return;
+  const chat = chats.create(firstText || "");
+  if (!firstText) chat.untitled = true;
+  state.chat = chat; state.history = chat.history; state.log = chat.log; files.scope = chat.id;
+  store.set("ma.currentChat", chat.id);
+  chats.save(chat);
+}
+
+function submit(text, withFiles) {
   text = (text || "").trim();
-  if (!text || state.running) return;
+  const attached = withFiles ? withFiles.filter((p) => files.has(p)) : state.pending.slice();
+  if ((!text && !attached.length) || state.running) return;
   if (!apiKey()) {
-    if (state.log.length) { openSettings(); return; }
+    if (state.log.length || attached.length) { openSettings(); return; }
     renderAll(); document.querySelector(".empty input")?.focus(); return;
   }
-  ui.input.value = ""; autosize(); updateSendState();
-  if (!state.chat) {                     // a new conversation becomes a saved chat on its first message
-    const chat = chats.create(text);
-    state.chat = chat; state.history = chat.history; state.log = chat.log; files.scope = chat.id;
-    store.set("ma.currentChat", chat.id);
-    chats.save(chat);
+  ui.input.value = ""; autosize();
+  if (!withFiles) { state.pending = []; renderPending(); }
+  updateSendState();
+  ensureChat(text);
+  if (state.chat.untitled) {
+    state.chat.title = titleFrom(text || `Attached ${listNames(attached)}`);
+    delete state.chat.untitled;
   }
-  runTurn(text);
+  runTurn(text, attached);
 }
+
+// ---------------------------------------------------------------------------
+// Attaching files: they go into the chat's files, where Python and the screenshot tool can open them
+// ---------------------------------------------------------------------------
+const MAX_ATTACH = 25 * 1024 * 1024;
+function freeName(name) {
+  const clean = String(name || "file").replace(/[\\/:*?"<>|\x00-\x1f]+/g, "_").replace(/^\.+/, "").trim() || "file";
+  if (!files.has(clean)) return clean;
+  const dot = clean.lastIndexOf(".");
+  const base = dot > 0 ? clean.slice(0, dot) : clean, ext = dot > 0 ? clean.slice(dot) : "";
+  for (let i = 2; ; i++) if (!files.has(`${base} (${i})${ext}`)) return `${base} (${i})${ext}`;
+}
+async function attachFiles(list) {
+  const picked = [...(list || [])];
+  if (!picked.length) return;
+  ensureChat("");
+  const tooBig = [];
+  for (const f of picked) {
+    if (f.size > MAX_ATTACH) { tooBig.push(f.name); continue; }
+    const name = freeName(f.name || `pasted-${Date.now()}.png`);
+    files.put(name, new Uint8Array(await f.arrayBuffer()));
+    state.pending.push(name);
+  }
+  renderPending();
+  renderChatList();
+  if (tooBig.length) flashNote(`${listNames(tooBig)} ${tooBig.length === 1 ? "is" : "are"} over 25 MB, so ${tooBig.length === 1 ? "it wasn't" : "they weren't"} attached.`);
+  updateSendState();
+  ui.input.focus();
+}
+function attachChip(path, removable) {
+  const info = fileInfo(path);
+  const f = files.get(path);
+  const kids = [];
+  if (info.kind === "image" && f) kids.push(el("img", { class: "chip-thumb", src: fileUrl(path), alt: "" }));
+  else kids.push(el("span", { class: `file-badge small k-${info.kind}`, "aria-hidden": "true" }, info.ext.toUpperCase().slice(0, 4) || "FILE"));
+  kids.push(el("span", { class: "chip-text" }, el("span", { class: "chip-name" }, path), el("span", { class: "chip-sub" }, f ? humanSize(f.bytes.length) : "Deleted")));
+  const chip = el(removable ? "div" : "button", removable ? { class: "chip" } : { class: "chip", type: "button", onclick: () => f && openPreview(path), "aria-label": `Open ${path}` }, ...kids);
+  if (removable) {
+    chip.append(el("button", { class: "chip-x", type: "button", "aria-label": `Remove ${path}`, onclick: () => {
+      state.pending = state.pending.filter((p) => p !== path);
+      files.remove(path);
+      renderPending(); updateSendState();
+    } }, icon("close", "ico")));
+  }
+  return chip;
+}
+function renderPending() {
+  ui.attachRow.replaceChildren(...state.pending.filter((p) => files.has(p)).map((p) => attachChip(p, true)));
+  ui.attachRow.hidden = !state.pending.length;
+  ui.form.classList.toggle("has-files", state.pending.length > 0);
+}
+ui.attachBtn.addEventListener("click", () => ui.fileInput.click());
+ui.fileInput.addEventListener("change", () => { attachFiles(ui.fileInput.files); ui.fileInput.value = ""; });
+ui.input.addEventListener("paste", (e) => {
+  const fl = [...(e.clipboardData?.files || [])];
+  if (fl.length) { e.preventDefault(); attachFiles(fl); }
+});
+document.addEventListener("dragover", (e) => { if ([...(e.dataTransfer?.types || [])].includes("Files")) { e.preventDefault(); ui.form.classList.add("drop"); } });
+document.addEventListener("dragleave", (e) => { if (!e.relatedTarget) ui.form.classList.remove("drop"); });
+document.addEventListener("drop", (e) => {
+  if (!e.dataTransfer?.files?.length) return;
+  e.preventDefault(); ui.form.classList.remove("drop");
+  attachFiles(e.dataTransfer.files);
+});
 
 ui.form.addEventListener("submit", (e) => {
   e.preventDefault();
@@ -2133,6 +2569,7 @@ document.getElementById("newChatBtn").addEventListener("click", () => newChat())
 // Chat history: open, switch, start and delete conversations
 // ---------------------------------------------------------------------------
 function openChat(chat, animate = true) {
+  state.pending = []; renderPending();
   state.chat = chat;
   state.history = chat ? chat.history : [];
   state.log = chat ? chat.log : [];
@@ -2300,6 +2737,7 @@ const f = {
   customVision: document.getElementById("customVision"),
   ask: document.getElementById("askInput"),
   debate: document.getElementById("debateInput"),
+  memory: document.getElementById("memoryInput"),
   relay: document.getElementById("relayInput"),
   seg: document.getElementById("providerSeg"),
   models: document.getElementById("modelList"),
@@ -2350,7 +2788,18 @@ function renderDebateFoot() {
   document.getElementById("debateFoot").textContent =
     `${lead.name} does the work and drafts the answer; ${other.name} checks it. They go back and forth, up to ${DEBATE_ROUNDS} rounds, until they agree. ` +
     `Slower, and uses more requests from both. Works best when the two use different models.` +
-    (missing ? ` Add ${!draft.keys[otherId] ? `a ${other.name}` : `a ${lead.name}`} key to use this.` : "");
+    (missing ? ` Add ${(n => (/^[AEIOU]/.test(n) ? "an " : "a ") + n)(!draft.keys[otherId] ? other.name : lead.name)} key to use this.` : "");
+}
+function renderMemory() {
+  const rows = document.getElementById("memoryRows");
+  rows.replaceChildren(...memory.items.map((m) => el("div", { class: "cell cell-memory" },
+    el("span", { class: "cell-text wrap" }, m.text),
+    el("button", { class: "mem-del", type: "button", "aria-label": `Forget: ${m.text}`, onclick: () => { memory.removeId(m.id); renderMemory(); } }, icon("close", "ico")))));
+  rows.hidden = !memory.items.length;
+  document.getElementById("forgetMemoryBtn").hidden = !memory.items.length;
+  document.getElementById("memoryFoot").textContent = memory.items.length
+    ? `${memory.items.length} thing${memory.items.length === 1 ? "" : "s"} saved on this device and used in every chat. You can also just say "remember…" or "forget…".`
+    : `When you tell it something lasting (your name, business, how you like answers), it saves a short note on this device and uses it in every chat. You can also say "remember…".`;
 }
 function renderSettingsFiles() {
   const list = document.getElementById("fileRows");
@@ -2376,6 +2825,8 @@ function openSettings() {
   showProvider(draft.provider);
   f.ask.checked = state.settings.askBeforeCode;
   f.debate.checked = state.settings.debate;
+  f.memory.checked = state.settings.memory;
+  renderMemory();
   f.relay.value = state.settings.relayUrl;
   renderSettingsFiles();
   settingsDlg.showModal();
@@ -2392,6 +2843,7 @@ function applySettings() {
   }
   state.settings.askBeforeCode = f.ask.checked;
   state.settings.debate = f.debate.checked;
+  state.settings.memory = f.memory.checked;
   state.settings.relayUrl = f.relay.value.trim();
   save.settings();
   draft = null;
@@ -2432,6 +2884,7 @@ document.getElementById("forgetBtn").addEventListener("click", () => {
   f.key.value = "";
   renderDebateFoot();
 });
+document.getElementById("forgetMemoryBtn").addEventListener("click", () => { memory.clear(); renderMemory(); });
 document.getElementById("clearFilesBtn").addEventListener("click", () => {
   for (const p of files.paths()) files.remove(p);
   renderSettingsFiles();

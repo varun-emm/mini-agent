@@ -11,12 +11,15 @@ The version number is shown next to the title. See [CHANGELOG.md](CHANGELOG.md) 
 | Tool | What it does |
 |---|---|
 | Web search | Groq: its `groq/compound-mini` model, which has search built in. OpenRouter: its `web` plugin (a small extra fee per search) |
-| Read a web page | Reads one URL in detail |
+| Read a web page | Gets the page's actual text (long pages in parts), through your relay or the free [Jina Reader](https://jina.ai/reader). Falls back to a search model's report if both fail |
 | Calculator | Exact maths, so the model never guesses numbers |
 | Python | Runs real Python in your browser with [Pyodide](https://pyodide.org). Libraries like openpyxl, python-docx, python-pptx and fpdf2 install by themselves the first time they're used |
 | Files | Makes Excel, Word, PDF, PowerPoint, PNG charts, CSV, Markdown, HTML, JSON, code and ZIP files |
 | Screenshot | Takes a screenshot of a file it made (chart, PDF, Word, Excel, CSV, HTML) or of a web page, and has a vision model check it |
 | Time | Knows today's date |
+| Plan | Shows its plan for a multi-step job as a live checklist |
+| Helpers | Hands independent parts of a big job to helper agents that work at the same time |
+| Memory | Saves short facts you tell it (name, business, preferences) and uses them in every chat |
 
 While it works, replies stream in live, and a line in the chat shows what's actually happening:
 
@@ -37,6 +40,15 @@ The spinner is your animation, and it turns and pulses with the work:
 | Writing the answer | clockwise | gentle beat on each burst of words | blue | slides gently |
 
 Its colours slide around the colour wheel (a hue shift) while saturation and transparency stay normal. Speed and colour shift both follow how fast text is arriving, each beat pushes the colours a little further, every finished step gives it a little pop and a quick colour jump, and it eases between moods. When the work is done it swells once and shrinks away.
+
+## Built for bigger jobs (v3)
+
+- **A plan you can watch.** For jobs of 3 or more steps, it writes a short plan first. It shows as a checklist under the status line, with each step ticked off as it finishes. Afterwards the plan sits at the top of the steps.
+- **Several things at once.** Independent lookups run at the same time (for example 3 searches at once). For a big job with separate parts, it hands each part to a **helper agent**. Up to 3 helpers work at once, each with its own tools, and their steps show as "Helper 1: …". The main agent then combines their reports.
+- **Attach your own files.** Tap the paperclip, or on a computer drag files onto the window or paste an image. PDFs, Word, Excel, CSV, PowerPoint and images (up to 25 MB each) go into the chat's files. The agent opens documents with Python and looks at images and scanned pages with the screenshot tool.
+- **Longer jobs.** It can take up to 60 steps per request (it was 20). When a chat gets long, it shortens old tool output and has the model summarise older messages instead of forgetting them. You'll see "Summarised the earlier conversation to make room" in the steps when that happens.
+- **Memory across chats.** Tell it something lasting, like "I run a phone shop in Pune", and it saves a short note. Every chat then starts knowing it. See and delete notes in **Settings → Memory**, or turn memory off. It's told never to save passwords, card or ID numbers, or health details. Notes stay on your device.
+- **Real page reading.** fetch_webpage now returns the page's own text instead of another model's summary, and reads long pages part by part.
 
 ## It checks its own work
 
@@ -104,6 +116,8 @@ Some APIs refuse calls made directly from a web page (this is called CORS). Open
 2. Open your new `https://<something>.vercel.app` link. That copy uses the relay automatically.
 3. Or keep using GitHub Pages: paste `https://<something>.vercel.app/api/chat` into **Settings → Groq relay**.
 
+The relay also has a page reader (`api/fetch.js`). When a relay is set up, Mini Agent reads web pages through it first, which works on sites the free reader can't open.
+
 The relay (`api/chat.js`) only forwards your own key to Groq. It stores nothing, holds no key of its own, and only accepts requests from `varun-emm.github.io` or its own site. To allow other sites, set an `ALLOWED_ORIGINS` environment variable in Vercel, as a comma-separated list.
 
 ## How it works
@@ -113,17 +127,22 @@ The model only ever writes text. `app.js` is the **harness** around it:
 1. **Think:** send the chat, a system prompt and the tool menu to the model (Groq or OpenRouter).
 2. **Act:** if the reply asks for a tool, run that tool in the browser.
 3. **Observe:** add the tool's result to the conversation.
-4. **Check:** repeat until the model answers without asking for a tool, with a limit of 20 steps.
+4. **Check:** repeat until the model answers without asking for a tool, with a limit of 60 steps.
 
 | Concept | Where it lives |
 |---|---|
 | Agent loop | `agentLoop()` in `app.js` (`runTurn()` runs one request) |
+| Plan | `update_plan` tool, `planNode()` |
+| Parallel work | `PARALLEL_SAFE` tools run together in `agentLoop()`; `delegate` tool, `helperView()`, `withHelperSlot()` |
+| Long jobs | `compactContext()`, `summarise()`, `repairToolPairs()` |
+| Memory | `memory`, `memorySection()`, `remember`/`forget` tools |
+| Attachments | `attachFiles()`, `renderPending()` |
+| Page reader | `readPage()` (relay, then Jina Reader, then a search model); `api/fetch.js` |
 | Debate | `debate()`, `reviewerPrompt()`, `readVerdict()` |
 | Providers | `PROVIDERS` and `callLLM()` (both speak the same OpenAI-style API) |
 | Tool definitions | `TOOLS` (each description tells the model *when* to use the tool) |
 | Tool code | `TOOL_FUNCTIONS` |
 | System prompt | `systemPrompt()` |
-| Context management | `trimHistory()` drops the oldest turns when the chat gets long |
 | Error recovery | tool errors go back to the model, and malformed tool calls are retried |
 | Streaming | `streamLLM()` reads thinking, answer text and tool calls as they're written |
 | Status line | `thoughtSnippet()`, `describeForming()` and `describe()` turn the stream into plain English |

@@ -283,6 +283,63 @@ a:hover { text-decoration: underline; }
   transition: transform 140ms ease, opacity 140ms ease, background 140ms ease;
 }
 .send:active { transform: scale(0.9); }
+/* attaching files */
+.composer { flex-wrap: wrap; padding-left: 6px; }
+.attach {
+  width: 38px; height: 38px; flex: none; border: 0; border-radius: 50%; background: transparent;
+  color: var(--label-2); display: grid; place-items: center; transition: background 140ms ease, transform 140ms ease;
+}
+.attach:active { transform: scale(0.9); background: var(--fill); }
+.attach svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+.attach-row { flex-basis: 100%; display: flex; gap: 8px; overflow-x: auto; padding: 4px 4px 6px; scrollbar-width: none; }
+.attach-row::-webkit-scrollbar { display: none; }
+.composer.drop { box-shadow: inset 0 0 0 2px var(--blue), var(--glass-shadow); }
+.chip {
+  flex: none; display: inline-flex; align-items: center; gap: 8px; max-width: 220px; position: relative;
+  background: var(--fill); border: 0; border-radius: 14px; padding: 6px 10px 6px 6px; text-align: left; color: var(--label);
+}
+.attach-row .chip { padding-right: 20px; }
+.chip-thumb { width: 36px; height: 36px; border-radius: 9px; object-fit: cover; flex: none; }
+.chip-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
+.chip-name { font-size: 13px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-sub { font-size: 12px; color: var(--label-2); }
+.chip-x {
+  position: absolute; top: -6px; right: -6px; width: 22px; height: 22px; border-radius: 50%; border: 0; padding: 0;
+  background: var(--label-2); color: var(--bg); display: grid; place-items: center;
+}
+.chip-x svg { width: 12px; height: 12px; stroke-width: 2.6; }
+.row.user { flex-direction: column; align-items: flex-end; gap: 6px; }
+.bubble-files { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; max-width: 82%; }
+
+/* the agent's plan */
+.plan { background: var(--fill); border-radius: 16px; padding: 10px 14px 12px; max-width: 520px; align-self: flex-start; width: 100%; box-sizing: border-box; }
+.activity .plan { margin: 10px 0 2px; }
+.plan-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; font-weight: 600; color: var(--label-2); margin-bottom: 6px; }
+.plan-count { font-weight: 500; font-variant-numeric: tabular-nums; }
+.plan-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.plan-item { display: flex; gap: 10px; align-items: flex-start; font-size: 15px; line-height: 1.35; color: var(--label); }
+.plan-mark {
+  width: 18px; height: 18px; flex: none; margin-top: 1px; border-radius: 50%; box-sizing: border-box;
+  border: 1.5px solid var(--label-3); display: grid; place-items: center; font-size: 11px; font-weight: 700; color: #fff;
+  transition: background 240ms ease, border-color 240ms ease;
+}
+.is-done .plan-mark { background: #34C759; border-color: #34C759; }
+.is-done .plan-text { color: var(--label-2); }
+.is-active .plan-mark { border-color: var(--blue); border-width: 5px; }
+.is-active .plan-text { font-weight: 600; }
+.is-skipped .plan-mark { border-color: var(--label-3); color: var(--label-3); }
+.is-skipped .plan-text { color: var(--label-3); text-decoration: line-through; }
+@media (prefers-reduced-motion: no-preference) {
+  .live ~ .plan .is-active .plan-mark { animation: plan-pulse 1.4s ease-in-out infinite; }
+  @keyframes plan-pulse { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--blue) 25%, transparent); } }
+}
+
+/* memory list in Settings */
+.cell-memory { gap: 10px; }
+.cell-text.wrap { white-space: normal; font-size: 15px; line-height: 1.35; }
+.mem-del { border: 0; background: var(--fill); color: var(--label-2); width: 28px; height: 28px; border-radius: 50%; display: grid; place-items: center; flex: none; padding: 0; }
+.mem-del svg { width: 14px; height: 14px; stroke-width: 2.4; }
+#memoryRows .cell + .cell::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; border-top: 0.5px solid var(--separator); }
 .send:disabled { background: var(--fill-2); color: var(--label-3); cursor: default; }
 .send svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round; }
 .send .i-stop { display: none; fill: currentColor; stroke: none; }
