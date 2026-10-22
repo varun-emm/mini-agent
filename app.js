@@ -4,7 +4,7 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "3.1.0";
+const APP_VERSION = "3.2.0";
 
 // ---------------------------------------------------------------------------
 // Providers: where the "brain" lives. Both speak the same OpenAI-style API.
@@ -66,6 +66,8 @@ function loadSettings() {
     relayUrl: "",
     debate: false,       // the other provider reviews each answer and they debate until they agree
     memory: true,        // remember facts about the user across chats
+    imageModel: "google/gemini-3.1-flash-image",   // makes pictures (OpenRouter)
+    videoModel: "google/veo-3.1-fast",             // makes videos (OpenRouter)
   };
   if (typeof saved.apiKey === "string") s.keys.groq = saved.apiKey;            // first version
   if (typeof saved.model === "string" && saved.model) s.models.groq = saved.model;
@@ -77,6 +79,8 @@ function loadSettings() {
   if (typeof saved.relayUrl === "string") s.relayUrl = saved.relayUrl;
   if (typeof saved.debate === "boolean") s.debate = saved.debate;
   if (typeof saved.memory === "boolean") s.memory = saved.memory;
+  if (typeof saved.imageModel === "string" && saved.imageModel) s.imageModel = saved.imageModel;
+  if (typeof saved.videoModel === "string" && saved.videoModel) s.videoModel = saved.videoModel;
   if (!s.keys[s.provider]) {
     const withKey = Object.keys(PROVIDERS).find((p) => s.keys[p]);
     if (withKey) s.provider = withKey;
@@ -298,6 +302,9 @@ const EXT_INFO = {
   css: ["code", "CSS", "text/css"],
   xml: ["code", "XML", "application/xml"],
   zip: ["archive", "ZIP archive", "application/zip"],
+  mp4: ["video", "MP4 video", "video/mp4"],
+  mov: ["video", "QuickTime video", "video/quicktime"],
+  webm: ["video", "WebM video", "video/webm"],
 };
 function fileInfo(path) {
   const ext = (path.split(".").pop() || "").toLowerCase();
@@ -872,6 +879,192 @@ async function readPage(url, signal) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Pictures and video, made by AI models on OpenRouter (needs an OpenRouter key, whichever provider is chatting)
+// ---------------------------------------------------------------------------
+const OR_API = "https://openrouter.ai/api/v1";
+const IMAGE_MODELS = [["google/gemini-3.1-flash-image", "Quick and cheap, good at edits"], ["openai/gpt-image-2", "Best at text inside images"], ["black-forest-labs/flux-3-image", "Photorealistic"]];
+const VIDEO_MODELS = [["google/veo-3.1-fast", "Good quality with sound, fair price"], ["google/veo-3.1", "Best quality, costs about 4x more"], ["kwaivgi/kling-v3.0-std", "Smooth motion, low price"], ["alibaba/wan-3.0", "Budget, clips up to 30 seconds"]];
+const orKey = () => state.settings.keys.openrouter || "";
+async function orFetch(path, { method = "GET", body, signal, raw = false } = {}) {
+  let res;
+  try {
+    res = await fetch(OR_API + path, {
+      method, signal,
+      headers: { Authorization: "Bearer " + orKey(), ...(body ? { "Content-Type": "application/json" } : {}) },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (e) {
+    if (e.name === "AbortError") throw e;
+    throw new Error("Couldn't reach OpenRouter. Check the internet connection.");
+  }
+  if (raw) return res;
+  let data = null;
+  try { data = await res.json(); } catch (_) { /* not JSON */ }
+  if (!res.ok || (data && data.error && !data.status)) {
+    const msg = (data && data.error && (data.error.message || data.error)) || `error ${res.status}`;
+    if (res.status === 401) throw new Error("OpenRouter rejected the key. Check it in Settings.");
+    if (res.status === 402) throw new Error("The OpenRouter account doesn't have enough credit (image and video models need more than $1 of credit).");
+    throw Object.assign(new Error(`OpenRouter: ${msg}`), { status: res.status });
+  }
+  return data;
+}
+const b64ToBytes = (b64) => { const bin = atob(b64); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
+const MEDIA_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/svg+xml": "svg", "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov" };
+function mediaName(wanted, prompt, ext) {
+  let base = String(wanted || "").split("/").pop().replace(/\.[a-z0-9]+$/i, "");
+  if (!base) base = String(prompt || "image").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ").slice(0, 4).join("-") || "image";
+  base = base.replace(/[\\/:*?"<>|]+/g, "_").slice(0, 60);
+  let name = `${base}.${ext}`;
+  for (let i = 2; files.has(name); i++) name = `${base}-${i}.${ext}`;
+  return name;
+}
+// An attached or earlier image, as a data URL no bigger than 1536px (what image models accept comfortably).
+async function imageRef(path) {
+  const p = cleanPath(path);
+  const f = files.get(p);
+  if (!f) throw new Error(`No file called ${p}. Use list_files to see what exists.`);
+  if (fileInfo(p).kind !== "image") throw new Error(`${p} isn't an image.`);
+  const img = await drawable(new Blob([f.bytes], { type: fileInfo(p).mime }));
+  const w0 = img.width || img.naturalWidth, h0 = img.height || img.naturalHeight;
+  const k = Math.min(1, 1536 / Math.max(w0, h0));
+  const c = document.createElement("canvas");
+  c.width = Math.round(w0 * k); c.height = Math.round(h0 * k);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL(fileInfo(p).ext === "png" ? "image/png" : "image/jpeg", 0.92);
+}
+const money = (usd) => (usd >= 0.995 ? `$${usd.toFixed(2)}` : usd >= 0.01 ? `$${usd.toFixed(3).replace(/0$/, "")}` : `under 1 cent`);
+
+async function makeImage({ prompt, aspect_ratio, edit, filename }, ctx) {
+  if (!prompt) throw new Error("prompt is required: describe the picture in detail");
+  const model = state.settings.imageModel || IMAGE_MODELS[0][0];
+  const refs = [];
+  for (const p of [].concat(edit || []).slice(0, 4)) refs.push({ type: "image_url", image_url: { url: await imageRef(p) } });
+  const body = { model, prompt, n: 1, output_format: "png" };
+  if (aspect_ratio) body.aspect_ratio = aspect_ratio;
+  if (refs.length) body.input_references = refs;
+  let bytes, mime = "image/png", cost = null;
+  try {
+    const data = await orFetch("/images", { method: "POST", body, signal: ctx.signal });
+    const d = data.data && data.data[0];
+    if (!d || !d.b64_json) throw new Error("OpenRouter sent back no image.");
+    bytes = b64ToBytes(d.b64_json); mime = d.media_type || mime;
+    cost = data.usage && data.usage.cost;
+  } catch (e) {
+    if (e.name === "AbortError" || ![400, 404, 405].includes(e.status)) throw e;
+    // some image models only work through chat: ask for an image in the reply instead
+    const content = refs.length ? [{ type: "text", text: prompt }, ...refs] : prompt;
+    const data = await orFetch("/chat/completions", { method: "POST", signal: ctx.signal, body: {
+      model, modalities: ["image", "text"], messages: [{ role: "user", content }], ...(aspect_ratio ? { image_config: { aspect_ratio } } : {}),
+    } });
+    const m = data.choices && data.choices[0] && data.choices[0].message;
+    const url = m && m.images && m.images[0] && m.images[0].image_url && m.images[0].image_url.url;
+    const hit = url && url.match(/^data:([^;]+);base64,(.+)$/);
+    if (!hit) throw new Error(`${model} didn't return an image${m && m.content ? `. It said: ${String(m.content).slice(0, 200)}` : "."}`);
+    mime = hit[1]; bytes = b64ToBytes(hit[2]);
+    cost = data.usage && data.usage.cost;
+  }
+  const name = mediaName(filename, prompt, MEDIA_EXT[mime] || "png");
+  files.put(name, bytes);
+  if (ctx.onImage) { try { ctx.onImage((await toJpeg(new Blob([bytes], { type: mime }))).src); } catch (_) { /* preview only */ } }
+  return `Saved ${name} (${humanSize(bytes.length)}, made with ${model}${typeof cost === "number" ? `, cost ${money(cost)}` : ""}). It's shown to the user automatically. ` +
+    `If details or text in it matter, check it with screenshot.`;
+}
+
+// Video: estimate the price, ask the user, start the job, wait for it, then download the clip.
+let videoModelsCache = null;
+async function videoModelInfo(model, signal) {
+  if (!videoModelsCache) {
+    try { videoModelsCache = (await orFetch("/videos/models", { signal })).data || []; } catch (e) { if (e.name === "AbortError") throw e; videoModelsCache = []; }
+  }
+  return videoModelsCache.find((m) => m.id === model || m.canonical_slug === model) || null;
+}
+function pickClosest(list, wanted, fallback) {
+  if (list && !Array.isArray(list) && typeof list === "object" && "min" in list) {   // a range like { min: 2, max: 30 }
+    const w = wanted ?? fallback;
+    return Math.max(list.min, Math.min(list.max ?? list.min, w));
+  }
+  if (!Array.isArray(list) || !list.length) return wanted ?? fallback;
+  if ((wanted == null || wanted === "") && list.includes(fallback)) return fallback;
+  if (wanted == null || wanted === "") return list[0];
+  if (list.includes(wanted)) return wanted;
+  if (typeof wanted === "number") return list.reduce((a, b) => (Math.abs(b - wanted) < Math.abs(a - wanted) ? b : a));
+  return list[0];
+}
+// The price list has per-second prices that can differ by resolution and by whether there's sound.
+// Returns { low, high } for the clip (the same when there's one price), or null if there's no per-second price.
+function priceFor(info, seconds, resolution) {
+  const sk = (info && info.pricing_skus) || {};
+  const rows = Object.entries(sk).filter(([k]) => /second/i.test(k))
+    .map(([k, v]) => [k.toLowerCase(), Number(v) / (/cent/i.test(k) ? 100 : 1)]).filter(([, v]) => Number.isFinite(v) && v > 0);
+  if (!rows.length) return null;
+  const res = String(resolution || "").toLowerCase();
+  const mentionsRes = (k) => /\d{3,4}p|\dk\b/.test(k);
+  let pick = rows.filter(([k]) => res && k.includes(res));
+  if (!pick.length) pick = rows.filter(([k]) => !mentionsRes(k));
+  if (!pick.length) pick = rows;
+  const vals = pick.map(([, v]) => v * seconds);
+  return { low: Math.min(...vals), high: Math.max(...vals) };
+}
+function confirmVideo(text) {
+  const dlg = document.getElementById("askVideo");
+  document.getElementById("askVideoText").textContent = text;
+  return new Promise((resolve) => {
+    dlg.addEventListener("close", () => resolve(dlg.returnValue === "yes"), { once: true });
+    dlg.returnValue = "";
+    dlg.showModal();
+  });
+}
+async function makeVideo({ prompt, seconds, aspect_ratio, resolution, from_image, filename }, ctx) {
+  if (!prompt) throw new Error("prompt is required: describe the scene, the camera movement and the mood");
+  const model = state.settings.videoModel || VIDEO_MODELS[0][0];
+  const info = await videoModelInfo(model, ctx.signal);
+  const dur = pickClosest(info && info.supported_durations, seconds ? Math.round(Number(seconds)) : null, 6);
+  const res = pickClosest(info && info.supported_resolutions, resolution || "720p", "720p");
+  const ratio = pickClosest(info && info.supported_aspect_ratios, aspect_ratio || "16:9", "16:9");
+  const est = priceFor(info, dur, res);
+  const ok = await confirmVideo(`${dur}-second ${res} video (${ratio}) with ${model.split("/").pop()}. ` +
+    (est ? `It will cost about ${est.high - est.low < 0.01 ? money(est.low) : `${money(est.low)} to ${money(est.high)} (more with sound)`} of OpenRouter credit.`
+      : "OpenRouter didn't list a per-second price for this model; video models usually cost $0.03 to $0.40 per second.") +
+    `\n\n“${String(prompt).slice(0, 240)}${String(prompt).length > 240 ? "…" : ""}”`);
+  if (!ok) return "The user chose not to make this video (it costs money). Ask if they'd like a shorter clip, a different model, or still images instead.";
+  const body = { model, prompt, duration: dur, resolution: res, aspect_ratio: ratio };
+  if (from_image) body.input_references = [{ type: "image_url", image_url: { url: await imageRef(from_image) } }];
+  const job = await orFetch("/videos", { method: "POST", body, signal: ctx.signal });
+  if (!job || !job.id) throw new Error("OpenRouter didn't start the video job.");
+  const started = Date.now();
+  let st = job;
+  while (!["completed", "failed", "cancelled", "expired"].includes(st.status)) {
+    if (Date.now() - started > 15 * 60 * 1000) throw new Error(`The video is still not ready after 15 minutes (job ${job.id}).`);
+    await waitFor(5000, ctx.signal);
+    const secs = Math.round((Date.now() - started) / 1000);
+    if (ctx.onProgress) ctx.onProgress(`Making the video (${secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, "0")}s`} so far, usually 1 to 3 minutes)`);
+    try { st = await orFetch(`/videos/${job.id}`, { signal: ctx.signal }); } catch (e) { if (e.name === "AbortError") throw e; }
+  }
+  if (st.status !== "completed") throw new Error(`The video ${st.status}${st.error ? `: ${typeof st.error === "string" ? st.error : st.error.message || ""}` : ""}.`);
+  if (ctx.onProgress) ctx.onProgress("Downloading the video");
+  let bytes = null, mime = "video/mp4";
+  const tries = [[`/videos/${job.id}/content?index=0`, true], ...((st.urls || []).map((u) => [u, false]))];
+  for (const [u, auth] of tries) {
+    try {
+      const r = auth ? await orFetch(u, { signal: ctx.signal, raw: true }) : await fetch(u, { signal: ctx.signal });
+      if (!r.ok) continue;
+      const blob = await r.blob();
+      if (blob.size < 1000) continue;
+      bytes = new Uint8Array(await blob.arrayBuffer()); mime = (blob.type || "").startsWith("video/") ? blob.type : mime;
+      break;
+    } catch (e) { if (ctx.signal && ctx.signal.aborted) throw e; }
+  }
+  const cost = st.usage && typeof st.usage.cost === "number" ? `, cost ${money(st.usage.cost)}` : "";
+  if (!bytes) {
+    const link = (st.urls || [])[0];
+    return `The video was made${cost}, but this browser couldn't download it.` + (link ? ` Give the user this link to open or save it (it works for a limited time; anyone with it can download the video): ${link}` : ` Its job id is ${job.id}.`);
+  }
+  const name = mediaName(filename, prompt, MEDIA_EXT[mime] || "mp4");
+  files.put(name, bytes);
+  return `Saved ${name} (${dur}s, ${res}, ${humanSize(bytes.length)}, made with ${model}${cost}). It's shown to the user automatically and plays in the chat.`;
+}
+
 // A helper agent: works on one self-contained task with its own conversation, in parallel with others.
 function helperPrompt() {
   return systemPrompt().replace(/^You are Mini Agent[^\n]*/, "You are a helper agent inside Mini Agent. A lead agent gave you one self-contained task; other helpers may be working on other parts at the same time. Do the task completely with your tools, then reply with a clear, factual report for the lead agent (not for the user): the findings with numbers, dates and source URLs, and the names of any files you made.")
@@ -972,6 +1165,14 @@ const TOOL_FUNCTIONS = {
     if (!ctx.spawn) throw new Error("Helpers can't start their own helpers. Do this part yourself.");
     return ctx.spawn(String(task).trim(), ctx.signal);
   },
+  async generate_image(args, ctx) {
+    if (!orKey()) return "Error: making pictures needs an OpenRouter key. Tell the user to add one in Settings (they can keep chatting on Groq).";
+    return makeImage(args, ctx);
+  },
+  async generate_video(args, ctx) {
+    if (!orKey()) return "Error: making videos needs an OpenRouter key. Tell the user to add one in Settings.";
+    return makeVideo(args, ctx);
+  },
   async get_current_time() {
     return new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short" }) +
       ` (${Intl.DateTimeFormat().resolvedOptions().timeZone})`;
@@ -1014,13 +1215,26 @@ const TOOLS = [
     "so you know it in future chats. Never save passwords, keys, card, bank or ID numbers, or health details.",
     { fact: { type: "string" } }, ["fact"]),
   tool("forget", "Remove something from memory when the user asks you to forget it.", { fact: { type: "string" } }, ["fact"]),
+  tool("generate_image", "Make a picture with an AI image model: photos, illustrations, logos, posters, product shots, social posts. " +
+    "Write a detailed prompt (subject, style, composition, lighting, colours, any exact text to show). To edit or restyle images in the workspace " +
+    "(attached or made earlier), list them in edit and describe the change. Not for charts or diagrams of data: use run_python for those.",
+    { prompt: { type: "string" }, aspect_ratio: { type: "string", description: "e.g. 1:1, 16:9, 9:16, 4:5" },
+      edit: { type: "array", items: { type: "string" }, description: "Image files to edit or use as reference" },
+      filename: { type: "string", description: "Short name for the file, without extension" } }, ["prompt"]),
+  tool("generate_video", "Make a short video clip with an AI video model. It costs real money (about $0.03 to $0.40 per second), takes 1 to 3 minutes, " +
+    "and the user is asked to confirm the price first. Use it only when the user asks for a video. Describe the scene, action, camera movement and mood. " +
+    "from_image animates an image in the workspace.",
+    { prompt: { type: "string" }, seconds: { type: "integer", description: "Length; the model's nearest supported length is used" },
+      aspect_ratio: { type: "string", description: "16:9, 9:16 or 1:1" }, resolution: { type: "string", description: "720p (default) or 1080p" },
+      from_image: { type: "string" }, filename: { type: "string" } }, ["prompt"]),
 ];
 // Who gets which tools
 const MEMORY_TOOLS = new Set(["remember", "forget"]);
-const leadTools = () => TOOLS.filter((t) => state.settings.memory || !MEMORY_TOOLS.has(t.function.name));
-const HELPER_TOOLS = TOOLS.filter((t) => !["delegate", "update_plan", "remember", "forget"].includes(t.function.name));
+const MEDIA_TOOLS = new Set(["generate_image", "generate_video"]);
+const leadTools = () => TOOLS.filter((t) => (state.settings.memory || !MEMORY_TOOLS.has(t.function.name)) && (orKey() || !MEDIA_TOOLS.has(t.function.name)));
+const helperTools = () => TOOLS.filter((t) => !["delegate", "update_plan", "remember", "forget", "generate_video"].includes(t.function.name) && (orKey() || !MEDIA_TOOLS.has(t.function.name)));
 // lookups that can safely run at the same time (they don't change files)
-const PARALLEL_SAFE = new Set(["web_search", "fetch_webpage", "calculator", "read_file", "list_files", "get_current_time", "delegate"]);
+const PARALLEL_SAFE = new Set(["web_search", "fetch_webpage", "calculator", "read_file", "list_files", "get_current_time", "delegate", "generate_image"]);
 
 async function executeTool(name, rawArgs, ctx) {
   const fn = TOOL_FUNCTIONS[name];
@@ -1061,6 +1275,8 @@ function describe(name, args, done) {
     case "update_plan": return done ? "Updated the plan" : "Updating the plan";
     case "remember": return done ? `Remembered ${quote(a.fact, 70)}` : "Saving to memory";
     case "forget": return done ? `Forgot ${quote(a.fact, 70)}` : "Removing from memory";
+    case "generate_image": return done ? `${a.edit && [].concat(a.edit).length ? "Edited" : "Made"} an image: ${quote(a.prompt, 60)}` : `${a.edit && [].concat(a.edit).length ? "Editing" : "Making"} an image: ${quote(a.prompt, 50)}`;
+    case "generate_video": return done ? `Made a video: ${quote(a.prompt, 60)}` : `Getting ready to make a video: ${quote(a.prompt, 45)}`;
     case "delegate": return done ? `A helper finished ${quote(a.task, 70)}` : `Handing ${quote(a.task, 60)} to a helper`;
     case "calculator": return `${done ? "Calculated" : "Calculating"} ${String(a.expression || "").slice(0, 60)}`;
     case "run_python": {
@@ -1127,6 +1343,8 @@ function describeForming(name, raw) {
       return t ? `Getting ready to look at ${/^https?:/i.test(t) ? hostOf(t) : t}` : "Getting ready to take a screenshot";
     }
     case "update_plan": return "Writing a plan";
+    case "generate_image": { const t = partialField(raw, "prompt"); return t ? `Describing the picture: ${quote(t, 55)}` : "Describing a picture"; }
+    case "generate_video": { const t = partialField(raw, "prompt"); return t ? `Describing the video: ${quote(t, 55)}` : "Describing a video"; }
     case "delegate": { const t = partialField(raw, "task"); return t ? `Briefing a helper: ${quote(t, 60)}` : "Briefing a helper"; }
     case "remember": return "Noting something to remember";
     default: return `Preparing ${name.replace(/_/g, " ")}`;
@@ -1140,6 +1358,7 @@ function stepDetail(name, args, result) {
   if (name === "screenshot") return `Asked: ${args.question || "(no question)"}\n\n${result}`;
   if (name === "run_python") return `${args.code || ""}\n\n— Output —\n${result}`;
   if (name === "calculator") return `${args.expression} = ${result}`;
+  if (name === "generate_image" || name === "generate_video") return `Prompt: ${args.prompt || ""}\n\n${result}`;
   if (name === "delegate") return `Task: ${args.task || ""}\n\n— Report —\n${result}`;
   if (name === "write_file") return result;
   return result;
@@ -1184,6 +1403,11 @@ Helpers and parallel work:
 - When you need several independent lookups, ask for all of them in one reply (for example three web_search calls at once). They run at the same time.
 - For a big job with independent parts (researching several companies, making separate files), call delegate once per part in the same reply, so helper agents work on them at the same time. Give each one a complete, self-contained task. Then combine their reports yourself and check the result.
 - Don't delegate small or sequential steps; do those yourself.
+
+Pictures and video:
+${orKey() ? `- generate_image makes pictures with an AI model (photos, illustrations, logos, posters, social posts) and can edit or restyle images in the workspace. Write detailed prompts. For charts of data use run_python instead.
+- generate_video makes short clips, but each one costs real money and the user must confirm the price. Use it only when they ask for a video.
+- After making an image whose details or text matter, check it with screenshot, and make it again if it's wrong.` : `- Making AI pictures and videos needs an OpenRouter key. If the user asks for one, tell them to add an OpenRouter key in Settings. You can still draw charts and diagrams with run_python.`}
 
 Files the user attaches:
 - They're in your workspace under their own names (list_files shows them). Open them with run_python: pypdf for PDFs, python-docx for Word, openpyxl or pandas for Excel and CSV, python-pptx for PowerPoint.
@@ -1523,6 +1747,7 @@ async function debate({ question, draft, turnMsg, madeFiles, view, signal }) {
 
 // One request from the user, start to finish. attached = names of files the user attached to it.
 async function runTurn(text, attached = []) {
+  finishSwitch();
   const note = attached.length
     ? `\n\n[The user attached ${attached.length === 1 ? "a file" : `${attached.length} files`}: ` +
       attached.map((p) => `${p} (${fileInfo(p).label}${files.has(p) ? `, ${humanSize(files.get(p).bytes.length)}` : ""})`).join(", ") +
@@ -1554,7 +1779,7 @@ async function runTurn(text, attached = []) {
     const hv = helperView(view, label);
     hv.progress(`Starting: ${thoughtSnippet(task, 60)}`);
     const msgs = [{ role: "user", content: task }];
-    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: HELPER_TOOLS, quiet: true, who: label, compact: true, maxSteps: HELPER_STEPS });
+    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: helperTools(), quiet: true, who: label, compact: true, maxSteps: HELPER_STEPS });
     if (report === null) return `${label} ran out of steps before finishing. What it had so far:\n${workSummary(msgs, 4000)}`;
     return report || `${label} finished without writing a report.`;
   });
@@ -1660,6 +1885,8 @@ const ICONS = {
   get_current_time: "M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18ZM12 7v5l3 2",
   screenshot: "M4 8V6a2 2 0 0 1 2-2h2M16 4h2a2 2 0 0 1 2 2v2M20 16v2a2 2 0 0 1-2 2h-2M8 20H6a2 2 0 0 1-2-2v-2M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
   debate: "M3 5h12v8H8l-4 3V13H3zM18 9h3v8h-1v3l-4-3h-5v-1",
+  generate_image: "M4 5h16v14H4zM4 15l4-4 4 4 3-3 5 5M15.5 8.5h.01",
+  generate_video: "M3 6h13v12H3zM16 10l5-3v10l-5-3",
   update_plan: "M9 6h11M9 12h11M9 18h11M4 6l1 1 2-2M4 12l1 1 2-2M4 18l1 1 2-2",
   delegate: "M9 11a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M17 11a2.5 2.5 0 1 0 0-5M18 14c2 .6 3.5 2.6 3.5 5",
   remember: "M6 3h12v18l-6-4-6 4z",
@@ -1738,22 +1965,24 @@ const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 // the glow colour (picked from the colours in your animation), and the hue shift:
 // drift = degrees per second the colours slide around the colour wheel (faster as text pours in,
 // and backwards when the spin is backwards), swing = extra degrees each pulse beat pushes them.
-// fps = how fast your animation's own frames play, as a multiple of its original speed (16.7 frames a second);
-// negative plays it backwards. It also speeds up as text pours in, and eases to a stop when the work is done.
+// fps = how fast your animation's own frames play, as a multiple of its original speed (16.7 frames a second):
+// 1x waiting, 2x thinking and writing, 3x backwards while searching or reading, 5x while making something.
+// It never plays slower than 1x or faster than 5x; text pouring in pushes it up a level, and it keeps its
+// pace to the end (fps 0 = keep the current speed).
 //   breath    = a slow, even swell
 //   inhale    = it draws in (shrinks) on each beat: taking information in
 //   heartbeat = a strong double beat that pushes out: making something
 const LOADER_MOODS = {
-  waiting: { dir: 1, base: 0.35, shape: "breath", amp: 0.06, hz: 0.55, glow: [70, 140, 255], fps: 0.45, drift: 12, swing: 8 },
-  thinking: { dir: 1, base: 0.8, shape: "breath", amp: 0.07, hz: 1.05, glow: [150, 110, 255], fps: 1, drift: 28, swing: 16 },
-  forming: { dir: 1, base: 1.1, shape: "breath", amp: 0.07, hz: 1.7, glow: [90, 190, 255], fps: 1.3, drift: 40, swing: 18 },
-  pull: { dir: -1, base: 1.6, shape: "inhale", amp: 0.12, hz: 1.25, glow: [40, 225, 190], fps: -1.3, drift: 48, swing: 28 },
-  make: { dir: 1, base: 2.0, shape: "heartbeat", amp: 0.14, hz: 1.1, glow: [255, 80, 190], fps: 1.8, drift: 75, swing: 36 },
-  answer: { dir: 1, base: 0.9, shape: "breath", amp: 0.05, hz: 0.9, glow: [60, 130, 255], fps: 1.1, drift: 30, swing: 10 },
+  waiting: { dir: 1, base: 0.35, shape: "breath", amp: 0.06, hz: 0.55, glow: [70, 140, 255], fps: 1, drift: 12, swing: 8 },
+  thinking: { dir: 1, base: 0.8, shape: "breath", amp: 0.07, hz: 1.05, glow: [150, 110, 255], fps: 2, drift: 28, swing: 16 },
+  forming: { dir: 1, base: 1.1, shape: "breath", amp: 0.07, hz: 1.7, glow: [90, 190, 255], fps: 2, drift: 40, swing: 18 },
+  pull: { dir: -1, base: 1.6, shape: "inhale", amp: 0.12, hz: 1.25, glow: [40, 225, 190], fps: -3, drift: 48, swing: 28 },
+  make: { dir: 1, base: 2.0, shape: "heartbeat", amp: 0.14, hz: 1.1, glow: [255, 80, 190], fps: 5, drift: 75, swing: 36 },
+  answer: { dir: 1, base: 0.9, shape: "breath", amp: 0.05, hz: 0.9, glow: [60, 130, 255], fps: 2, drift: 30, swing: 10 },
   done: { dir: 1, base: 0, shape: "breath", amp: 0, hz: 0.5, glow: [70, 140, 255], fps: 0, drift: 0, swing: 0 },
 };
 // Your animation, as a strip of its 60 frames (10 across, 6 down), so the app can play it at any speed.
-const SPRITE = { frames: 60, cols: 10, rows: 6, fps: 1000 / 60 };
+const SPRITE = { frames: 60, cols: 10, rows: 6, fps: 1000 / 60, min: 1, max: 5 };
 const PULSE_SHAPES = {
   breath: (p) => (1 - Math.cos(2 * Math.PI * p)) / 2 - 0.35,
   inhale: (p) => -Math.pow(Math.sin(Math.PI * p), 3),
@@ -1778,7 +2007,8 @@ function makeLoader() {
   let glow = [...mood.glow];
   let drift = mood.drift, swing = mood.swing;   // ease toward the mood's, like the glow
   let hueBase = 0, hueNow = 0;                    // degrees around the colour wheel
-  let frame = Math.random() * SPRITE.frames, fpsNow = mood.fps * SPRITE.fps, shownFrame = -1;
+  let frame = Math.random() * SPRITE.frames, shownFrame = -1;
+  let speed = Math.max(SPRITE.min, Math.abs(mood.fps)), way = Math.sign(mood.fps) || 1;   // speed in x, way = forwards/backwards
   const showFrame = () => {
     const f = ((Math.floor(frame) % SPRITE.frames) + SPRITE.frames) % SPRITE.frames;
     if (f === shownFrame) return;
@@ -1819,9 +2049,13 @@ function makeLoader() {
     const beat = Math.max(0, Math.min(1, shape === "breath" ? raw + 0.35 : Math.abs(raw)));
     hueNow = hueBase + swing * beat + kick * 160;
     // the animation's own frames: speed set by the mood and how fast text arrives; backwards for searching
-    const fpsTarget = mood.fps * SPRITE.fps * (1 + boost * 0.35);
-    fpsNow += (fpsTarget - fpsNow) * Math.min(1, dt * 3);
-    frame += fpsNow * dt;
+    if (mood.fps) {
+      way = Math.sign(mood.fps);                                   // turning round happens at once: it never crawls through 0
+      const target = Math.min(SPRITE.max, Math.abs(mood.fps) * (1 + boost * 0.25));
+      speed += (target - speed) * Math.min(1, dt * 3);
+    }
+    speed = Math.max(SPRITE.min, Math.min(SPRITE.max, speed));
+    frame += way * speed * SPRITE.fps * dt;
     showFrame();
     if (!stopping) {
       wrap.style.transform = `scale(${scale.toFixed(3)})`;
@@ -1835,14 +2069,14 @@ function makeLoader() {
   run();
   return {
     node: wrap,
-    mood(name) { mood = LOADER_MOODS[name] || LOADER_MOODS.thinking; run(); },
+    mood(name) { mood = LOADER_MOODS[name] || LOADER_MOODS.thinking; wrap.dataset.mood = LOADER_MOODS[name] ? name : "thinking"; run(); },
     feed(chars) { flow += chars * 4; kick = Math.min(0.14, kick + chars / 700); run(); },   // every streamed chunk nudges it
-    step() { steps++; kick = Math.min(0.3, kick + 0.22); fpsNow += (fpsNow < 0 ? -1 : 1) * 12; run(); },                         // a finished step: a pop
+    step() { steps++; kick = Math.min(0.3, kick + 0.22); speed = Math.min(SPRITE.max, speed + 1); run(); },                         // a finished step: a pop
     get direction() { return rate < 0 ? -1 : 1; },
     get rate() { return rate; },
     get scale() { return 1 + pulseValue + kick; },
     get hue() { return ((hueNow % 360) + 360) % 360; },
-    get fps() { return fpsNow; },
+    get fps() { return way * speed; },   // in x: 1 to 5, negative = backwards
     get frame() { return shownFrame; },
     async spinDown() {
       mood = LOADER_MOODS.done; kick = Math.min(0.3, kick + 0.2); run();               // one last swell...
@@ -2019,12 +2253,16 @@ function filesNode(paths) {
   if (!paths || !paths.length) return null;
   const wrap = el("div", { class: "files" });
   for (const p of paths) {
+    if (fileInfo(p).kind === "video" && files.has(p)) {
+      wrap.append(el("div", { class: "video-card" }, el("video", { src: fileUrl(p), controls: "", playsinline: "", preload: "metadata", "aria-label": p })));
+      continue;
+    }
     if (fileInfo(p).kind === "image" && files.has(p)) {
       wrap.append(el("button", { class: "image-card", type: "button", onclick: () => openPreview(p), "aria-label": `Open ${p}` },
         el("img", { src: fileUrl(p), alt: p.split("/").pop(), loading: "lazy" })));
     }
   }
-  const cards = paths.filter((p) => !(fileInfo(p).kind === "image" && files.has(p)));   // images are already shown big
+  const cards = paths.filter((p) => !(fileInfo(p).kind === "image" && files.has(p)));   // images are already shown big (videos get a card too, for share and download)
   if (cards.length) wrap.append(el("div", { class: "file-list" }, ...cards.map(fileCard)));
   return wrap;
 }
@@ -2342,6 +2580,7 @@ async function buildPreview(path, body) {
   const url = fileUrl(path);
   try {
     if (info.kind === "image") { body.replaceChildren(el("img", { class: "preview-img", src: url, alt: path })); return; }
+    if (info.kind === "video") { body.replaceChildren(el("video", { class: "preview-img", src: url, controls: "", playsinline: "", autoplay: "" })); return; }
     if (info.ext === "pdf") {          // draw the pages with pdf.js, so it looks the same on every phone and browser
       body.replaceChildren(el("p", { class: "muted center" }, "Opening PDF…"));
       const pdfjs = await import(PDFJS_URL);
@@ -2596,16 +2835,22 @@ function openChat(chat, animate = true) {
   files.scope = chat ? chat.id : null;
   store.set("ma.currentChat", chat ? chat.id : "");
   if (animate && !reduceMotion) {
+    clearTimeout(switchTimer);
     ui.thread.classList.remove("thread-in");
     ui.thread.classList.add("thread-out");
-    setTimeout(() => {
-      renderAll();
-      ui.thread.classList.remove("thread-out");
-      void ui.thread.offsetWidth;
-      ui.thread.classList.add("thread-in");
-    }, 170);
-  } else renderAll();
+    switchTimer = setTimeout(finishSwitch, 170);
+  } else { clearTimeout(switchTimer); switchTimer = 0; renderAll(); }
   renderChatList();
+}
+// The old chat fades out, then the new one is drawn. Sending a message mid-switch finishes it at once.
+let switchTimer = 0;
+function finishSwitch() {
+  if (!switchTimer) return;
+  clearTimeout(switchTimer); switchTimer = 0;
+  renderAll();
+  ui.thread.classList.remove("thread-out");
+  void ui.thread.offsetWidth;
+  ui.thread.classList.add("thread-in");
 }
 
 function newChat() {
@@ -2801,6 +3046,7 @@ function showProvider(p) {
   document.getElementById("forgetBtn").textContent = `Forget ${P.name} key`;
   renderModels();
   renderDebateFoot();
+  if (draft.imageModel) renderMediaModels();
 }
 function renderDebateFoot() {
   const lead = PROVIDERS[draft.provider], otherId = Object.keys(PROVIDERS).find((p) => p !== draft.provider), other = PROVIDERS[otherId];
@@ -2809,6 +3055,22 @@ function renderDebateFoot() {
     `${lead.name} does the work and drafts the answer; ${other.name} checks it. They go back and forth, up to ${DEBATE_ROUNDS} rounds, until they agree. ` +
     `Slower, and uses more requests from both. Works best when the two use different models.` +
     (missing ? ` Add ${(n => (/^[AEIOU]/.test(n) ? "an " : "a ") + n)(!draft.keys[otherId] ? other.name : lead.name)} key to use this.` : "");
+}
+function renderMediaModels() {
+  const pick = (boxId, otherId, list, key) => {
+    const box = document.getElementById(boxId), other = document.getElementById(otherId);
+    const cur = draft[key];
+    box.replaceChildren(...list.map(([id, label]) => el("button", { class: "cell cell-choice", type: "button", role: "radio", "aria-checked": String(id === cur),
+      onclick: () => { draft[key] = id; other.value = ""; renderMediaModels(); } },
+      el("span", { class: "cell-text" }, el("span", {}, id.split("/").pop()), el("span", { class: "cell-sub" }, label)),
+      el("span", { class: "check", "aria-hidden": "true" }, id === cur ? "✓" : ""))));
+    other.value = list.some(([id]) => id === cur) ? "" : cur;
+    other.oninput = () => { const v = other.value.trim(); draft[key] = v || list[0][0]; if (v) for (const b of box.querySelectorAll(".cell-choice")) { b.setAttribute("aria-checked", "false"); b.querySelector(".check").textContent = ""; } };
+  };
+  pick("imageList", "customImage", IMAGE_MODELS, "imageModel");
+  pick("videoList", "customVideo", VIDEO_MODELS, "videoModel");
+  document.getElementById("mediaFoot").textContent = (draft.keys.openrouter ? "" : "Needs an OpenRouter key (you can still chat on Groq). ") +
+    "Pictures cost about $0.01 to $0.13 each. Videos cost about $0.03 to $0.40 per second (a 6-second clip is usually $0.30 to $2.40), and it always asks you before making one.";
 }
 function renderMemory() {
   const rows = document.getElementById("memoryRows");
@@ -2839,6 +3101,8 @@ function openSettings() {
     keys: Object.assign({}, state.settings.keys),
     models: Object.assign({}, state.settings.models),
     visionModels: Object.assign({}, state.settings.visionModels),
+    imageModel: state.settings.imageModel,
+    videoModel: state.settings.videoModel,
   };
   f.key.type = "password";
   document.getElementById("toggleKey").textContent = "Show";
@@ -2847,6 +3111,7 @@ function openSettings() {
   f.debate.checked = state.settings.debate;
   f.memory.checked = state.settings.memory;
   renderMemory();
+  renderMediaModels();
   f.relay.value = state.settings.relayUrl;
   renderSettingsFiles();
   settingsDlg.showModal();
@@ -2864,6 +3129,8 @@ function applySettings() {
   state.settings.askBeforeCode = f.ask.checked;
   state.settings.debate = f.debate.checked;
   state.settings.memory = f.memory.checked;
+  state.settings.imageModel = draft.imageModel || IMAGE_MODELS[0][0];
+  state.settings.videoModel = draft.videoModel || VIDEO_MODELS[0][0];
   state.settings.relayUrl = f.relay.value.trim();
   save.settings();
   draft = null;

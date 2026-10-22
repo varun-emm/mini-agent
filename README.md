@@ -20,6 +20,8 @@ The version number is shown next to the title. See [CHANGELOG.md](CHANGELOG.md) 
 | Plan | Shows its plan for a multi-step job as a live checklist |
 | Helpers | Hands independent parts of a big job to helper agents that work at the same time |
 | Memory | Saves short facts you tell it (name, business, preferences) and uses them in every chat |
+| Pictures | Makes and edits images with an AI image model on OpenRouter (posters, product shots, logos, photos) |
+| Video | Makes short AI video clips on OpenRouter, after showing you the price and asking first |
 
 While it works, replies stream in live, and a line in the chat shows what's actually happening:
 
@@ -33,13 +35,13 @@ The spinner is your animation, and it turns and pulses with the work:
 
 | What's happening | Spin | Animation frames | Pulse | Glow | Colour shift |
 |---|---|---|---|---|---|
-| Waiting for the model's first word | slow drift | about half speed | slow, even breath | blue | barely drifts |
-| Thinking | clockwise | normal speed | breath that quickens as words arrive | violet | slides steadily |
-| Searching, reading, looking at a screenshot | counter-clockwise | backwards | draws in (shrinks) on each beat | teal | slides backwards |
-| Making a file or running code | clockwise, fast | almost double speed | strong double heartbeat | pink | sweeps fastest |
-| Writing the answer | clockwise | a little faster | gentle beat on each burst of words | blue | slides gently |
+| Waiting for the model's first word | slow drift | 1× (normal speed) | slow, even breath | blue | barely drifts |
+| Thinking | clockwise | 2× | breath that quickens as words arrive | violet | slides steadily |
+| Searching, reading, looking at a screenshot | counter-clockwise | 3×, backwards | draws in (shrinks) on each beat | teal | slides backwards |
+| Making a file or running code | clockwise, fast | 5× | strong double heartbeat | pink | sweeps fastest |
+| Writing the answer | clockwise | 2× | gentle beat on each burst of words | blue | slides gently |
 
-The app plays your animation frame by frame from a strip of its 60 frames (`assets/loader-frames.webp`), so it controls the speed and direction. Its colours slide around the colour wheel (a hue shift) while saturation and transparency stay normal. Speed and colour shift both follow how fast text is arriving, each beat pushes the colours a little further, every finished step gives it a little pop and a quick colour jump, and it eases between moods. When the work is done it swells once and shrinks away.
+The app plays your animation frame by frame from a strip of its 60 frames (`assets/loader-frames.webp`), so it controls the speed and direction. It never plays slower than 1× or faster than 5×: text pouring in pushes it up a level, each finished step gives it a burst, and it turns round instantly instead of slowing through a stop. Its colours slide around the colour wheel (a hue shift) while saturation and transparency stay normal. Speed and colour shift both follow how fast text is arriving, each beat pushes the colours a little further, every finished step gives it a little pop and a quick colour jump, and it eases between moods. When the work is done it swells once and shrinks away.
 
 ## Built for bigger jobs (v3)
 
@@ -49,6 +51,16 @@ The app plays your animation frame by frame from a strip of its 60 frames (`asse
 - **Longer jobs.** It can take up to 60 steps per request (it was 20). When a chat gets long, it shortens old tool output and has the model summarise older messages instead of forgetting them. You'll see "Summarised the earlier conversation to make room" in the steps when that happens.
 - **Memory across chats.** Tell it something lasting, like "I run a phone shop in Pune", and it saves a short note. Every chat then starts knowing it. See and delete notes in **Settings → Memory**, or turn memory off. It's told never to save passwords, card or ID numbers, or health details. Notes stay on your device.
 - **Real page reading.** fetch_webpage now returns the page's own text instead of another model's summary, and reads long pages part by part.
+
+## Pictures and video (v3.2)
+
+These use AI models on OpenRouter, so they need an **OpenRouter key**. You can still chat on Groq; the key is used only for pictures and video.
+
+- **Pictures:** ask for a poster, product shot, logo or social post, or attach a photo and ask for changes ("make this a watercolour", "put this phone on a marble table"). The picture appears in the chat as a file you can share or download, and the agent checks it with a screenshot when text or details matter. Pictures cost about $0.01 to $0.13 each.
+- **Video:** ask for a clip, or to animate a picture. Before anything is charged, it shows the length, quality, model and **estimated price**, and waits for you to tap **Make Video**. Clips take 1 to 3 minutes and play in the chat. Prices run from about $0.03 to $0.40 per second, so a 6-second clip is usually $0.30 to $2.40.
+- Pick the models in **Settings → Picture model** and **Video model**, or type any model ID from [openrouter.ai/models](https://openrouter.ai/models).
+
+If a phone or browser can't download a finished video directly, the answer gives you a time-limited link to it instead.
 
 ## It checks its own work
 

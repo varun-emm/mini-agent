@@ -14,7 +14,7 @@
   <link rel="icon" type="image/png" href="assets/icon.png">
   <link rel="apple-touch-icon" href="assets/icon.png">
   <link rel="preload" href="assets/loader-frames.webp" as="image">
-  <link rel="stylesheet" href="styles.css?v=3.1.0">
+  <link rel="stylesheet" href="styles.css?v=3.2.0">
 </head>
 <body>
   <div class="app">
@@ -127,6 +127,29 @@
       </div>
 
       <div class="group">
+        <div class="group-head">Picture model</div>
+        <div class="cells">
+          <div id="imageList" role="radiogroup" aria-label="Picture model"></div>
+          <label class="cell cell-input">
+            <span class="sr-only">Other picture model</span>
+            <input id="customImage" placeholder="Other model ID" spellcheck="false" autocapitalize="off" autocomplete="off">
+          </label>
+        </div>
+      </div>
+
+      <div class="group">
+        <div class="group-head">Video model</div>
+        <div class="cells">
+          <div id="videoList" role="radiogroup" aria-label="Video model"></div>
+          <label class="cell cell-input">
+            <span class="sr-only">Other video model</span>
+            <input id="customVideo" placeholder="Other model ID" spellcheck="false" autocapitalize="off" autocomplete="off">
+          </label>
+        </div>
+        <div class="group-foot" id="mediaFoot"></div>
+      </div>
+
+      <div class="group">
         <div class="group-head">Memory</div>
         <div class="cells">
           <label class="cell cell-toggle">
@@ -223,8 +246,22 @@
     </form>
   </dialog>
 
+  <!-- Video cost check -->
+  <dialog class="alert" id="askVideo" aria-labelledby="askVideoTitle">
+    <form method="dialog">
+      <div class="alert-body">
+        <h2 id="askVideoTitle">Make this video?</h2>
+        <p id="askVideoText" class="pre-line"></p>
+      </div>
+      <div class="alert-actions">
+        <button value="no">Not Now</button>
+        <button value="yes" class="strong">Make Video</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-  <script src="app.js?v=3.1.0"></script>
+  <script src="app.js?v=3.2.0"></script>
 </body>
 </html>
