@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <title>Mini Agent</title>
-  <meta name="description" content="A small AI agent with tools that makes real files, running on Groq or OpenRouter.">
+  <meta name="description" content="A small AI agent with tools that makes real files, running on OpenRouter (Kimi, Claude, GPT and more).">
   <meta name="theme-color" content="#FFFFFF" media="(prefers-color-scheme: light)">
   <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -14,7 +14,7 @@
   <link rel="icon" type="image/png" href="assets/icon.png">
   <link rel="apple-touch-icon" href="assets/icon.png">
   <link rel="preload" href="assets/loader-frames.webp" as="image">
-  <link rel="stylesheet" href="styles.css?v=3.2.0">
+  <link rel="stylesheet" href="styles.css?v=4.0.0">
 </head>
 <body>
   <div class="app">
@@ -85,14 +85,8 @@
     </div>
     <div class="sheet-scroll">
       <div class="group">
-        <div class="group-head">Provider</div>
+        <div class="group-head">OpenRouter key</div>
         <div class="cells">
-          <div class="cell">
-            <div class="segmented" id="providerSeg" role="tablist" aria-label="Provider">
-              <button type="button" role="tab" data-p="groq">Groq</button>
-              <button type="button" role="tab" data-p="openrouter">OpenRouter</button>
-            </div>
-          </div>
           <label class="cell cell-input">
             <span class="sr-only">API key</span>
             <input id="keyInput" type="password" spellcheck="false" autocapitalize="off" autocomplete="off">
@@ -168,8 +162,16 @@
         <div class="group-head">Debate</div>
         <div class="cells">
           <label class="cell cell-toggle">
-            <span>Groq and OpenRouter debate before answering</span>
+            <span>A second model reviews every answer</span>
             <input type="checkbox" class="switch" id="debateInput">
+          </label>
+        </div>
+        <div class="group-head sub">Reviewer</div>
+        <div class="cells">
+          <div id="reviewList" role="radiogroup" aria-label="Reviewer model"></div>
+          <label class="cell cell-input">
+            <span class="sr-only">Other reviewer model</span>
+            <input id="customReview" placeholder="Other model ID" spellcheck="false" autocapitalize="off" autocomplete="off">
           </label>
         </div>
         <div class="group-foot" id="debateFoot"></div>
@@ -194,14 +196,14 @@
       </div>
 
       <div class="group" id="relayGroup">
-        <div class="group-head">Groq relay</div>
+        <div class="group-head">Page reader relay (optional)</div>
         <div class="cells">
           <label class="cell cell-input">
             <span class="sr-only">Relay URL</span>
-            <input id="relayInput" type="url" placeholder="https://your-app.vercel.app/api/chat" spellcheck="false" autocapitalize="off">
+            <input id="relayInput" type="url" placeholder="https://your-app.vercel.app" spellcheck="false" autocapitalize="off">
           </label>
         </div>
-        <div class="group-foot">Only needed if Groq blocks calls from web pages. See the README.</div>
+        <div class="group-foot">If you deploy this repo to Vercel, paste its address here and web pages are read through it, which works on sites the free reader can't open. See the README.</div>
       </div>
 
       <div class="group">
@@ -262,6 +264,6 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-  <script src="app.js?v=3.2.0"></script>
+  <script src="app.js?v=4.0.0"></script>
 </body>
 </html>

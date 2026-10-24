@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mini Agent - a small agentic chatbot running on Groq.
+Mini Agent - a small agentic chatbot running on OpenRouter (Kimi, Claude, GPT and more).
 
 This file IS the "harness": the software wrapped around the model.
 The model only writes text. This program:
@@ -10,8 +10,8 @@ The model only writes text. This program:
   4. repeats until the model replies without asking for a tool (CHECK -> DONE)
 
 Run:   python agent.py
-Needs: pip install groq ddgs requests
-       GROQ_API_KEY set in your environment (see README.md)
+Needs: pip install openai ddgs requests
+       OPENROUTER_API_KEY set in your environment (see README.md)
 """
 
 import ast
@@ -26,14 +26,14 @@ import sys
 from pathlib import Path
 
 try:
-    from groq import Groq
+    from openai import OpenAI
 except ImportError:
-    sys.exit("Missing package. Run:  pip install groq ddgs requests")
+    sys.exit("Missing package. Run:  pip install openai ddgs requests")
 
 # ---------------------------------------------------------------------------
 # Settings
 # ---------------------------------------------------------------------------
-MODEL = os.environ.get("AGENT_MODEL", "openai/gpt-oss-120b")  # the "brain"
+MODEL = os.environ.get("AGENT_MODEL", "moonshotai/kimi-k3.1-pro")  # the "brain" (any OpenRouter model with tools)
 MAX_STEPS = 15              # safety brake: max loop rounds per message
 MAX_TOOL_OUTPUT = 6000      # characters of tool output shown to the model
 MAX_HISTORY_CHARS = 60000   # rough context budget before old turns are dropped
@@ -329,9 +329,10 @@ def run_agent_turn(client, messages):
 # CHAT INTERFACE
 # ---------------------------------------------------------------------------
 def main():
-    if not os.environ.get("GROQ_API_KEY"):
-        sys.exit("GROQ_API_KEY is not set. See README.md for how to add your key.")
-    client = Groq()
+    key = os.environ.get("OPENROUTER_API_KEY")
+    if not key:
+        sys.exit("OPENROUTER_API_KEY is not set. See README.md for how to add your key.")
+    client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=key)
     messages = [{"role": "system", "content": system_prompt()}]
 
     print(f"{C.BOLD}Mini Agent{C.END} on {MODEL}. Files go in: {WORKSPACE}")

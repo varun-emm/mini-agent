@@ -1,6 +1,6 @@
 # Mini Agent
 
-A tiny AI agent that runs in your browser on [Groq](https://groq.com) or [OpenRouter](https://openrouter.ai). It thinks, uses tools, checks its work, loops until the job is done, and hands you real files: Excel, Word, PDF, PowerPoint, charts and more.
+A tiny AI agent that runs in your browser on [OpenRouter](https://openrouter.ai), which gives one key access to Kimi, Claude, GPT and hundreds of other models. The default brain is **Kimi K3.1 Pro**. It thinks, uses tools, checks its work, loops until the job is done, and hands you real files: Excel, Word, PDF, PowerPoint, charts and more.
 
 **Open it:** https://varun-emm.github.io/mini-agent/ (after the one-time setup below)
 
@@ -10,7 +10,7 @@ The version number is shown next to the title. See [CHANGELOG.md](CHANGELOG.md) 
 
 | Tool | What it does |
 |---|---|
-| Web search | Groq: its `groq/compound-mini` model, which has search built in. OpenRouter: its `web` plugin (a small extra fee per search) |
+| Web search | OpenRouter's `web` plugin (a small extra fee per search) |
 | Read a web page | Gets the page's actual text (long pages in parts), through your relay or the free [Jina Reader](https://jina.ai/reader). Falls back to a search model's report if both fail |
 | Calculator | Exact maths, so the model never guesses numbers |
 | Python | Runs real Python in your browser with [Pyodide](https://pyodide.org). Libraries like openpyxl, python-docx, python-pptx and fpdf2 install by themselves the first time they're used |
@@ -54,7 +54,7 @@ The app plays your animation frame by frame from a strip of its 60 frames (`asse
 
 ## Pictures and video (v3.2)
 
-These use AI models on OpenRouter, so they need an **OpenRouter key**. You can still chat on Groq; the key is used only for pictures and video.
+These use picture and video models on OpenRouter, with the same key.
 
 - **Pictures:** ask for a poster, product shot, logo or social post, or attach a photo and ask for changes ("make this a watercolour", "put this phone on a marble table"). The picture appears in the chat as a file you can share or download, and the agent checks it with a screenshot when text or details matter. Pictures cost about $0.01 to $0.13 each.
 - **Video:** ask for a clip, or to animate a picture. Before anything is charged, it shows the length, quality, model and **estimated price**, and waits for you to tap **Make Video**. Clips take 1 to 3 minutes and play in the chat. Prices run from about $0.03 to $0.40 per second, so a 6-second clip is usually $0.30 to $2.40.
@@ -69,21 +69,21 @@ Mini Agent has a **screenshot** tool. After it makes a chart, PDF, Word, Excel, 
 - You see each screenshot in the steps under the answer. Tap it to view it full size.
 - Files are drawn inside the browser: images as they are, PDFs with [pdf.js](https://mozilla.github.io/pdf.js/), and documents and web pages with [html-to-image](https://github.com/bubkoo/html-to-image) inside a sandboxed frame, so a page the agent made can't reach this app or your keys.
 - Web pages are captured by [Microlink](https://microlink.io). Without a key it allows about 25 screenshots a day.
-- The vision model is set in **Settings → Vision model**: `qwen/qwen3.8-27b` on Groq, and `anthropic/claude-haiku-5.5` on OpenRouter by default.
+- The vision model is set in **Settings → Vision model**. The default is `anthropic/claude-haiku-5.5`; Kimi K3.1 Pro reads images too.
 - PowerPoint files can't be screenshotted. The agent checks those by reading them with python-pptx.
 
-## Debate mode: two AIs check each other
+## Debate mode: two models check each other
 
-Save both a Groq key and an OpenRouter key, then turn on **Settings → Debate**. Every answer then goes through a debate before you see it:
+Turn on **Settings → Debate** and pick a **Reviewer**. Every answer then goes through a debate before you see it:
 
-1. The provider picked in Settings (the **lead**) does the work: searches, code, files. Then it writes a draft.
-2. The other provider (the **reviewer**) checks the draft. It can verify facts with web search, redo maths with the calculator, and screenshot or read the files the lead made. Then it says **agree**, or lists what's wrong.
-3. The lead weighs each point, fixes what's right (including the files), pushes back on what isn't, and writes a new answer.
+1. Your main model (the **writer**, Kimi K3.1 Pro by default) does the work: searches, code, files. Then it writes a draft.
+2. The **reviewer** (Claude Sonnet 5.5 by default) checks the draft. It can verify facts with web search, redo maths with the calculator, and screenshot or read the files the writer made. Then it says **agree**, or lists what's wrong.
+3. The writer weighs each point, fixes what's right (including the files), pushes back on what isn't, and writes a new answer.
 4. Steps 2 and 3 repeat until the reviewer agrees, up to 3 rounds. If they still disagree after that, the answer says what they disagree on.
 
-While it runs, a coloured tag in the status line shows whose turn it is. Afterwards the summary says, for example, **Worked for 40s, agreed after 2 rounds**. Tap it to read the whole exchange. The title shows **Groq ⇄ OpenRouter, debating** while it's on.
+While it runs, a coloured tag in the status line shows whose turn it is (blue for the writer, orange for the reviewer). Afterwards the summary says, for example, **Worked for 40s, agreed after 2 rounds**. Tap it to read the whole exchange. The title shows **Kimi ⇄ Claude, debating** while it's on.
 
-It's slower and uses more requests from both providers. It works best when the two use different models, such as gpt-oss-120b on Groq and claude-sonnet-5.5 on OpenRouter. If the reviewer can't be reached (no credits, rate limit), you still get the lead's answer, with a note in the steps.
+It's slower and costs more. It works best when the reviewer is a different model from the writer. If the reviewer can't be reached (no credits, rate limit), you still get the writer's answer, with a note in the steps.
 
 ## Chat history
 
@@ -101,42 +101,37 @@ Every file the agent makes shows up under its answer as a card. Charts and image
 ## One-time setup
 
 1. **Turn on GitHub Pages:** in this repo, go to **Settings → Pages**. Under "Build and deployment", set Source to **Deploy from a branch**, choose branch **main** and folder **/ (root)**, then tap **Save**. After about a minute, the app is live at the link above.
-2. **Get a key** from either provider:
-   - Groq (free tier, very fast): https://console.groq.com/keys. Keys start with `gsk_`.
-   - OpenRouter (hundreds of models, including Claude and GPT, pay as you go): https://openrouter.ai/settings/keys. Keys start with `sk-or-`.
-3. **Open the app** and paste your key. It works out which provider the key belongs to. The key is saved only in that browser, never in this repo.
+2. **Get an OpenRouter key** at https://openrouter.ai/settings/keys (keys start with `sk-or-`) and add a few dollars of credit. Picture and video models need more than $1 of credit.
+3. **Open the app** and paste your key. It's saved only in that browser, never in this repo.
 
-You can save both keys and switch between them in **Settings → Provider**. Each provider remembers its own model.
+Mini Agent used to support Groq as well. Since v4.0 it runs on OpenRouter only; if you had a Groq key saved, the app asks for an OpenRouter key instead.
 
 ## Choosing a model
 
-| Provider | Suggested model | Notes |
+| Model | ID | Notes |
 |---|---|---|
-| Groq | `openai/gpt-oss-120b` | Default. Fast, and covered by the free tier |
-| OpenRouter | `openai/gpt-oss-120b` | Default. Costs fractions of a cent per question |
-| OpenRouter | `anthropic/claude-sonnet-5.5` | Noticeably smarter at multi-step jobs, and costs more |
+| Kimi K3.1 Pro | `moonshotai/kimi-k3.1-pro` | Default. Strongest at long, multi-step jobs; reads images; 1M-token context. About $2 per million input tokens and $10 per million output tokens, so a typical multi-step task is roughly $0.20 to $0.50 |
+| Claude Sonnet 5.5 | `anthropic/claude-sonnet-5.5` | Careful and clear; the default reviewer in Debate mode |
+| GPT-OSS 120B | `openai/gpt-oss-120b` | Cheapest, roughly 10x less than Kimi, but weaker at long jobs |
 
-On OpenRouter, any model that supports tool calling works. Filter by "Tools" at https://openrouter.ai/models.
+Any OpenRouter model that supports tool calling works: type its ID in **Settings → Model → Other model ID**. Filter by "Tools" at https://openrouter.ai/models.
 
-Groq's free tier allows only a few requests per minute, and an agent makes several per question. When Groq asks it to slow down, Mini Agent waits the time Groq gives (up to about 45 seconds) and tries again by itself. For longer limits, it tells you when to try again. If you hit this often, use an OpenRouter key.
+If OpenRouter asks it to slow down (rate limits, mostly on free `:free` models), Mini Agent waits the time it's given (up to about 45 seconds) and tries again by itself.
 
-## If it says "Couldn't reach Groq"
+## Optional: a page reader relay
 
-Some APIs refuse calls made directly from a web page (this is called CORS). OpenRouter allows them, so the easiest fix is to switch to an OpenRouter key. To stay on Groq, deploy the included relay for free:
+Browsers can't fetch most websites directly, so Mini Agent reads pages through the free Jina Reader. For sites that block it, you can deploy your own small reader for free:
 
 1. Sign in at https://vercel.com with GitHub, choose **Add New → Project**, and import `mini-agent`. Leave every setting as it is and deploy.
-2. Open your new `https://<something>.vercel.app` link. That copy uses the relay automatically.
-3. Or keep using GitHub Pages: paste `https://<something>.vercel.app/api/chat` into **Settings → Groq relay**.
+2. Open your new `https://<something>.vercel.app` link (that copy uses the reader automatically), or paste that address into **Settings → Page reader relay** to use it from GitHub Pages.
 
-The relay also has a page reader (`api/fetch.js`). When a relay is set up, Mini Agent reads web pages through it first, which works on sites the free reader can't open.
-
-The relay (`api/chat.js`) only forwards your own key to Groq. It stores nothing, holds no key of its own, and only accepts requests from `varun-emm.github.io` or its own site. To allow other sites, set an `ALLOWED_ORIGINS` environment variable in Vercel, as a comma-separated list.
+The reader (`api/fetch.js`) fetches the page and returns its text. It stores nothing, refuses private network addresses, and only accepts requests from `varun-emm.github.io` or its own site. To allow other sites, set an `ALLOWED_ORIGINS` environment variable in Vercel, as a comma-separated list.
 
 ## How it works
 
 The model only ever writes text. `app.js` is the **harness** around it:
 
-1. **Think:** send the chat, a system prompt and the tool menu to the model (Groq or OpenRouter).
+1. **Think:** send the chat, a system prompt and the tool menu to the model on OpenRouter.
 2. **Act:** if the reply asks for a tool, run that tool in the browser.
 3. **Observe:** add the tool's result to the conversation.
 4. **Check:** repeat until the model answers without asking for a tool, with a limit of 60 steps.
@@ -151,7 +146,7 @@ The model only ever writes text. `app.js` is the **harness** around it:
 | Attachments | `attachFiles()`, `renderPending()` |
 | Page reader | `readPage()` (relay, then Jina Reader, then a search model); `api/fetch.js` |
 | Debate | `debate()`, `reviewerPrompt()`, `readVerdict()` |
-| Providers | `PROVIDERS` and `callLLM()` (both speak the same OpenAI-style API) |
+| Provider | `PROVIDERS` (OpenRouter) and `callLLM()` (OpenAI-style API) |
 | Tool definitions | `TOOLS` (each description tells the model *when* to use the tool) |
 | Tool code | `TOOL_FUNCTIONS` |
 | System prompt | `systemPrompt()` |
@@ -169,22 +164,21 @@ The model only ever writes text. `app.js` is the **harness** around it:
 
 - **Add a tool:** write an async function in `TOOL_FUNCTIONS`, then describe it in `TOOLS`. That's all an "integration" is.
 - **Change the status wording:** edit `describe()` in `app.js`.
-- **Different brain:** change the provider or model in Settings. Any model ID that supports tools works.
-- **Another provider:** any OpenAI-compatible API can be added as one more entry in `PROVIDERS`.
+- **Different brain:** change the model in Settings. Any OpenRouter model ID that supports tools works.
 
 ## Command-line version
 
-`cli/agent.py` is the same agent as a Python terminal app (Groq only):
+`cli/agent.py` is the same agent as a Python terminal app, also on OpenRouter (Kimi K3.1 Pro by default; set `AGENT_MODEL` to change it):
 
 ```
-pip install groq ddgs requests
-export GROQ_API_KEY="gsk_..."
+pip install openai ddgs requests
+export OPENROUTER_API_KEY="sk-or-..."
 python cli/agent.py
 ```
 
 ## Safety notes
 
-- Your key lives in your browser's local storage. Use **Settings → Forget my key** on shared devices.
-- Set a spend limit in the Groq console, or a credit limit on your OpenRouter key. Agent loops use more tokens than plain chat.
+- Your key lives in your browser's local storage. Use **Settings → Forget OpenRouter key** on shared devices.
+- Set a credit limit on your OpenRouter key. Agent loops use more tokens than plain chat, and Kimi or Claude cost more than the cheapest models.
 - Python runs inside a sandbox in your browser. It has no internet access and can only touch the agent's own files, so it runs without asking. Turn on **Ask before running code** if you'd rather approve each run.
 - The first time Python runs, the browser downloads it (about 10 MB). After that it's cached.

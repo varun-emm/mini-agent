@@ -169,8 +169,8 @@ a:hover { text-decoration: underline; }
   flex: none; padding: 1px 8px; border-radius: 9px; font-size: 12px; font-weight: 600; line-height: 1.5;
   color: #fff; background: #5E5CE6; letter-spacing: 0.01em;
 }
-.speaker[data-p="groq"] { background: #F55036; }
-.speaker[data-p="openrouter"] { background: #6467F2; }
+.speaker[data-p="lead"] { background: #6467F2; }
+.speaker[data-p="review"] { background: #F55036; }
 .speaker[hidden] { display: none; }
 @media (prefers-reduced-motion: no-preference) {
   .speaker-in { animation: speaker-in 320ms cubic-bezier(.2, .8, .2, 1) both; }
@@ -630,3 +630,5 @@ a:hover { text-decoration: underline; }
 #imageList .cell + .cell::before, #videoList .cell + .cell::before, #imageList + .cell::before, #videoList + .cell::before {
   content: ""; position: absolute; top: 0; left: 16px; right: 0; border-top: 0.5px solid var(--separator);
 }
+.group-head.sub { margin-top: 14px; }
+#reviewList .cell + .cell::before, #reviewList + .cell::before { content: ""; position: absolute; top: 0; left: 16px; right: 0; border-top: 0.5px solid var(--separator); }

@@ -2,5 +2,5 @@
   "name": "mini-agent",
   "private": true,
   "type": "module",
-  "description": "A tiny agent with tools, running on Groq, supervised by a blob."
+  "description": "A browser AI agent with tools that makes real files, running on OpenRouter (Kimi K3.1 Pro by default)."
 }

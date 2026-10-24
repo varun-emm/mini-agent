@@ -1,38 +1,31 @@
-/* Mini Agent: an agent loop (think -> act -> observe -> check) running in your browser on Groq or OpenRouter.
+/* Mini Agent: an agent loop (think -> act -> observe -> check) running in your browser on OpenRouter.
    Everything here is the "harness". The model only writes text; this file runs the tools. */
 "use strict";
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "3.2.0";
+const APP_VERSION = "4.0.0";
 
 // ---------------------------------------------------------------------------
-// Providers: where the "brain" lives. Both speak the same OpenAI-style API.
+// The provider: OpenRouter, which reaches hundreds of models (Kimi, Claude, GPT and more) with one key.
+// It speaks the OpenAI-style API.
 // ---------------------------------------------------------------------------
 const PROVIDERS = {
-  groq: {
-    name: "Groq",
-    url: "https://api.groq.com/openai/v1/chat/completions",
-    keyPrefix: "gsk_",
-    keyLink: "https://console.groq.com/keys",
-    defaultModel: "openai/gpt-oss-120b",
-    searchModel: "groq/compound-mini",          // Groq model with built-in web search
-    visionModel: "qwen/qwen3.8-27b",             // looks at screenshots
-    visionModels: [["qwen/qwen3.8-27b", "Reads images, up to 3 per request"]],
-    models: [["openai/gpt-oss-120b", "Smartest"], ["openai/gpt-oss-20b", "Fastest"], ["qwen/qwen3.8-27b", "Preview"]],
-  },
   openrouter: {
     name: "OpenRouter",
     url: "https://openrouter.ai/api/v1/chat/completions",
     keyPrefix: "sk-or-",
     keyLink: "https://openrouter.ai/settings/keys",
-    defaultModel: "openai/gpt-oss-120b",
+    defaultModel: "moonshotai/kimi-k3.1-pro",
     searchModel: "openai/gpt-oss-120b",         // cheap model + OpenRouter's "web" plugin
     visionModel: "anthropic/claude-haiku-5.5",
-    visionModels: [["anthropic/claude-haiku-5.5", "Sharp at reading documents"], ["openai/gpt-6-luna", "Fast and cheap"], ["qwen/qwen3.8-omni-flash", "Cheap alternative"]],
-    models: [["openai/gpt-oss-120b", "Cheap and capable"], ["anthropic/claude-sonnet-5.5", "Smarter, costs more"]],
+    visionModels: [["anthropic/claude-haiku-5.5", "Sharp at reading documents"], ["moonshotai/kimi-k3.1-pro", "Kimi reads images too"], ["openai/gpt-6-luna", "Fast and cheap"]],
+    models: [["moonshotai/kimi-k3.1-pro", "Kimi K3.1 Pro: strongest at long jobs"], ["anthropic/claude-sonnet-5.5", "Claude: careful and clear"], ["openai/gpt-oss-120b", "Cheapest, about 10x less"]],
   },
 };
+// Short, friendly names for models, used when two of them debate
+const MODEL_NAMES = { "moonshotai/kimi-k3.1-pro": "Kimi", "anthropic/claude-sonnet-5.5": "Claude", "anthropic/claude-haiku-5.5": "Claude Haiku", "openai/gpt-oss-120b": "GPT-OSS" };
+const modelName = (id) => MODEL_NAMES[id] || String(id || "").split("/").pop().replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const MAX_STEPS = 60;              // steps per request before it stops and asks to continue
 const HELPER_STEPS = 25;           // steps a helper agent may take
 const MAX_TOOL_OUTPUT = 6000;
@@ -58,39 +51,39 @@ const store = {
 function loadSettings() {
   const saved = store.get("ma.settings", {}) || {};
   const s = {
-    provider: "groq",
-    keys: { groq: "", openrouter: "" },
-    models: { groq: PROVIDERS.groq.defaultModel, openrouter: PROVIDERS.openrouter.defaultModel },
-    visionModels: { groq: PROVIDERS.groq.visionModel, openrouter: PROVIDERS.openrouter.visionModel },
+    provider: "openrouter",
+    keys: { openrouter: "" },
+    models: { openrouter: PROVIDERS.openrouter.defaultModel },
+    visionModels: { openrouter: PROVIDERS.openrouter.visionModel },
     askBeforeCode: false,
     relayUrl: "",
-    debate: false,       // the other provider reviews each answer and they debate until they agree
+    debate: false,       // a second model reviews each answer and they debate until they agree
+    reviewModel: "anthropic/claude-sonnet-5.5",   // the reviewer in a debate
     memory: true,        // remember facts about the user across chats
     imageModel: "google/gemini-3.1-flash-image",   // makes pictures (OpenRouter)
     videoModel: "google/veo-3.1-fast",             // makes videos (OpenRouter)
   };
-  if (typeof saved.apiKey === "string") s.keys.groq = saved.apiKey;            // first version
-  if (typeof saved.model === "string" && saved.model) s.models.groq = saved.model;
-  if (PROVIDERS[saved.provider]) s.provider = saved.provider;
-  Object.assign(s.keys, saved.keys || {});
-  Object.assign(s.models, saved.models || {});
-  Object.assign(s.visionModels, saved.visionModels || {});
+  // Groq was removed in v4: only the OpenRouter key, model and vision model carry over
+  const from = (o) => (o && typeof o.openrouter === "string" ? o.openrouter : "");
+  if (from(saved.keys)) s.keys.openrouter = from(saved.keys);
+  if (from(saved.models)) s.models.openrouter = from(saved.models);
+  if (from(saved.visionModels)) s.visionModels.openrouter = from(saved.visionModels);
+  if (typeof saved.reviewModel === "string" && saved.reviewModel) s.reviewModel = saved.reviewModel;
+  s.hadGroqKey = !!(saved.keys && saved.keys.groq) || typeof saved.apiKey === "string";
+  // v4 makes Kimi K3.1 Pro the main model: move the old default over once (a model someone picked on purpose stays)
+  if (saved.v !== 4 && s.models.openrouter === "openai/gpt-oss-120b") s.models.openrouter = PROVIDERS.openrouter.defaultModel;
+  s.v = 4;
   if (typeof saved.askBeforeCode === "boolean") s.askBeforeCode = saved.askBeforeCode;
   if (typeof saved.relayUrl === "string") s.relayUrl = saved.relayUrl;
   if (typeof saved.debate === "boolean") s.debate = saved.debate;
   if (typeof saved.memory === "boolean") s.memory = saved.memory;
   if (typeof saved.imageModel === "string" && saved.imageModel) s.imageModel = saved.imageModel;
   if (typeof saved.videoModel === "string" && saved.videoModel) s.videoModel = saved.videoModel;
-  if (!s.keys[s.provider]) {
-    const withKey = Object.keys(PROVIDERS).find((p) => s.keys[p]);
-    if (withKey) s.provider = withKey;
-  }
   return s;
 }
 
 function detectProvider(key) {
   if (key.startsWith(PROVIDERS.openrouter.keyPrefix)) return "openrouter";
-  if (key.startsWith(PROVIDERS.groq.keyPrefix)) return "groq";
   return null;
 }
 
@@ -129,17 +122,17 @@ const state = {
   log: [],             // what the chat shows
   running: false,
   abort: null,
-  speaker: null,       // during a debate, the provider that's talking right now (null = the one picked in Settings)
+  speaker: null,       // during a debate, the model that's talking right now (null = the main model from Settings)
   pending: [],         // files attached in the composer, waiting to be sent
 };
 
-const activeId = () => state.speaker || state.settings.provider;
-const provider = () => PROVIDERS[activeId()];
-const apiKey = () => state.settings.keys[activeId()] || "";
-const currentModel = () => state.settings.models[activeId()] || provider().defaultModel;
-const visionModel = () => state.settings.visionModels[activeId()] || provider().visionModel;
-const otherProvider = () => Object.keys(PROVIDERS).find((p) => p !== state.settings.provider);
-const debateReady = () => state.settings.debate && !!state.settings.keys[otherProvider()] && !!state.settings.keys[state.settings.provider];
+const provider = () => PROVIDERS.openrouter;
+const apiKey = () => state.settings.keys.openrouter || "";
+const mainModel = () => state.settings.models.openrouter || provider().defaultModel;
+const currentModel = () => state.speaker || mainModel();
+const visionModel = () => state.settings.visionModels.openrouter || provider().visionModel;
+const reviewModel = () => state.settings.reviewModel || "anthropic/claude-sonnet-5.5";
+const debateReady = () => state.settings.debate && !!apiKey();
 
 // ---------------------------------------------------------------------------
 // IndexedDB: chats and file bytes live here, on this device only
@@ -230,7 +223,7 @@ const chats = {
 };
 
 const save = {
-  settings: () => store.set("ma.settings", state.settings),
+  settings: () => { const { hadGroqKey, ...keep } = state.settings; store.set("ma.settings", keep); },
   chat: () => {
     if (!state.chat) return;
     state.chat.history = state.history;
@@ -337,12 +330,7 @@ class AgentError extends Error {
   constructor(message, code) { super(message); this.code = code; }
 }
 
-function endpoint() {
-  if (activeId() === "openrouter") return PROVIDERS.openrouter.url;
-  if (state.settings.relayUrl) return state.settings.relayUrl.trim();
-  if (location.hostname.endsWith(".vercel.app")) return "/api/chat";
-  return PROVIDERS.groq.url;
-}
+function endpoint() { return PROVIDERS.openrouter.url; }
 
 async function postLLM(body, signal) {
   try {
@@ -354,11 +342,7 @@ async function postLLM(body, signal) {
     });
   } catch (e) {
     if (e.name === "AbortError") throw e;
-    if (activeId() === "openrouter") {
-      throw new AgentError("Couldn't reach OpenRouter. Check your internet connection and try again.", "network");
-    }
-    throw new AgentError("Couldn't reach Groq. You may be offline, or Groq may be blocking calls from web pages. " +
-      "Switching to an OpenRouter key in Settings fixes the second case.", "network");
+    throw new AgentError("Couldn't reach OpenRouter. Check your internet connection and try again.", "network");
   }
 }
 
@@ -373,7 +357,7 @@ function apiError(status, err, model) {
   if (status === 429) {
     const when = (((e.message || "").match(/try again in\s*([\dhms.]+)/i) || [])[1] || "").replace(/\.+$/, "");
     return new AgentError(`${name}'s rate limit was hit${when ? ` (it says to try again in ${when})` : ""}. Wait, then tap Try again. ` +
-      (name === "Groq" ? "Groq's free tier allows only a few requests per minute; an OpenRouter key avoids this." : ""), "rate");
+      "Free models (ending in :free) have tight limits; paid models rarely hit this.", "rate");
   }
   if (status === 404 && /model/i.test(e.message || "")) {
     return new AgentError(`${name} doesn't recognise the model "${model}", or it can't use tools. Pick another model in Settings.`, "model");
@@ -506,7 +490,7 @@ function cleanPath(p) {
 
 async function askWeb(prompt, signal, domain) {
   const body = { model: provider().searchModel, messages: [{ role: "user", content: prompt }] };
-  if (activeId() === "openrouter") {
+  {
     const plugin = { id: "web", max_results: 5 };
     if (domain) plugin.include_domains = [domain];
     body.plugins = [plugin];
@@ -848,7 +832,7 @@ const pageCache = new Map();
 function relayBase() {
   if (location.hostname.endsWith(".vercel.app")) return "";
   const r = (state.settings.relayUrl || "").trim();
-  return r ? r.replace(/\/api\/chat\/?$/, "") : null;
+  return r ? r.replace(/\/+$/, "").replace(/\/api\/(chat|fetch)$/, "") : null;
 }
 function withTimeout(signal, ms) {
   const c = new AbortController();
@@ -1166,7 +1150,7 @@ const TOOL_FUNCTIONS = {
     return ctx.spawn(String(task).trim(), ctx.signal);
   },
   async generate_image(args, ctx) {
-    if (!orKey()) return "Error: making pictures needs an OpenRouter key. Tell the user to add one in Settings (they can keep chatting on Groq).";
+    if (!orKey()) return "Error: making pictures needs an OpenRouter key. Tell the user to add one in Settings.";
     return makeImage(args, ctx);
   },
   async generate_video(args, ctx) {
@@ -1671,11 +1655,10 @@ function readVerdict(review) {
 
 async function debate({ question, draft, turnMsg, madeFiles, view, signal }) {
   const turnStart = state.history.indexOf(turnMsg) + 1;
-  const leadId = state.settings.provider, revId = otherProvider();
-  const L = PROVIDERS[leadId].name, R = PROVIDERS[revId].name;
   const short = (m) => m.split("/").pop();
-  const leadModel = currentModel();
-  const revModel = state.settings.models[revId] || PROVIDERS[revId].defaultModel;
+  const leadModel = mainModel(), revModel = reviewModel();
+  let L = modelName(leadModel), R = modelName(revModel);
+  if (L === R) { L += " (writer)"; R += " (reviewer)"; }   // the same model can review itself, with fresh eyes
   const earlier = state.history.slice(0, turnStart - 1)
     .filter((m) => (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content && !m.tool_calls)
     .slice(-4).map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${truncate(m.content, 1200)}`).join("\n\n");
@@ -1691,10 +1674,10 @@ async function debate({ question, draft, turnMsg, madeFiles, view, signal }) {
 
   for (let round = 1; round <= DEBATE_ROUNDS; round++) {
     // the reviewer checks the current answer
-    view.speaker(R);
+    view.speaker(R, "review");
     view.progress(round === 1 ? `${R} is reviewing ${L}'s answer` : `${R} is checking ${L}'s changes`);
     let review;
-    state.speaker = revId;
+    state.speaker = revModel;
     try {
       review = await agentLoop(revMsgs, view, signal, { system: reviewerPrompt(L, short(leadModel)), tools: REVIEW_TOOLS, quiet: true, who: R });
     } catch (e) {
@@ -1714,7 +1697,7 @@ async function debate({ question, draft, turnMsg, madeFiles, view, signal }) {
 
     // the lead weighs the points, fixes what's right, and answers again
     const last = round === DEBATE_ROUNDS;
-    view.speaker(L);
+    view.speaker(L, "lead");
     view.progress(`${L} is weighing ${R}'s points`);
     leadMsgs.push({ role: "user", content:
       `[Debate, round ${round}] Before the user sees your answer, ${R} (model ${short(revModel)}) reviewed it and raised these points:\n\n${v.body}\n\n` +
@@ -1766,7 +1749,7 @@ async function runTurn(text, attached = []) {
   const changedFiles = () => files.paths().filter((p) => before.get(p) !== files.get(p).mtime);
   const debating = debateReady();
 
-  rateNotice = (secs, n) => view.progress(`${provider().name} asked us to slow down. Trying again in ${secs}s${n > 1 ? ` (attempt ${n + 1})` : ""}`);
+  rateNotice = (secs, n) => view.progress(`OpenRouter asked us to slow down. Trying again in ${secs}s${n > 1 ? ` (attempt ${n + 1})` : ""}`);
   state.running = true;
   state.abort = new AbortController();
   const signal = state.abort.signal;
@@ -1793,7 +1776,7 @@ async function runTurn(text, attached = []) {
   };
 
   try {
-    if (debating) view.speaker(provider().name);
+    if (debating) view.speaker(modelName(mainModel()) === modelName(reviewModel()) ? `${modelName(mainModel())} (writer)` : modelName(mainModel()), "lead");
     let answer = await agentLoop(state.history, view, signal, { system: systemPrompt, tools: leadTools(), quiet: debating, compact: true, spawn });
     if (answer === null) {
       state.history.push({ role: "assistant", content: `I stopped after ${MAX_STEPS} steps without finishing.` });
@@ -1802,7 +1785,7 @@ async function runTurn(text, attached = []) {
     }
     let debated = null;
     if (debating) {
-      view.addStep({ icon: "note", label: `${provider().name} drafted an answer`, detail: answer });
+      view.addStep({ icon: "note", label: `${modelName(mainModel())} drafted an answer`, detail: answer });
       debated = await debate({ question: text || turnMsg.content, draft: answer, turnMsg, madeFiles: changedFiles(), view, signal });
       answer = debated.text;
       state.history[state.history.length - 1] = { role: "assistant", content: answer };   // the agreed answer is what's remembered
@@ -2373,11 +2356,11 @@ function liveTurn(turn) {
       setStatus(describe(name, args, false), "run:" + name + JSON.stringify(args).slice(0, 80), 700, false, 350);   // real actions cut in quickly
     },
     progress(text) { setStatus(text, "progress:" + text, 500); },
-    speaker(name) {                      // during a debate: whose turn it is
+    speaker(name, role = "lead") {       // during a debate: whose turn it is
       if (!name) { speakerTag.hidden = true; return; }
       if (speakerTag.textContent === name && !speakerTag.hidden) return;
       speakerTag.textContent = name;
-      speakerTag.dataset.p = name.toLowerCase();
+      speakerTag.dataset.p = role;
       speakerTag.hidden = false;
       if (!reduceMotion) { speakerTag.classList.remove("speaker-in"); void speakerTag.offsetWidth; speakerTag.classList.add("speaker-in"); }
     },
@@ -2479,13 +2462,13 @@ function renderEmpty() {
   const wrap = el("section", { class: "empty" });
   wrap.append(el("img", { class: "empty-mark", src: "assets/loader-still.png", alt: "" }));
   if (!apiKey()) {
-    const input = el("input", { type: "password", placeholder: "gsk_... or sk-or-...", "aria-label": "Groq or OpenRouter API key", spellcheck: "false", autocapitalize: "off", autocomplete: "off" });
+    const input = el("input", { type: "password", placeholder: "sk-or-...", "aria-label": "OpenRouter API key", spellcheck: "false", autocapitalize: "off", autocomplete: "off" });
     const error = el("p", { class: "field-error", role: "alert" });
     const saveKey = () => {
       const v = input.value.trim();
       if (!v) { error.textContent = "Paste a key first."; input.focus(); return; }
       const p = detectProvider(v);
-      if (!p) { error.textContent = "That doesn't look like a Groq key (gsk_...) or an OpenRouter key (sk-or-...). For other keys, use Settings."; input.focus(); return; }
+      if (!p) { error.textContent = v.startsWith("gsk_") ? "That's a Groq key. Mini Agent now runs on OpenRouter: get a key at openrouter.ai (keys start with sk-or-)." : "That doesn't look like an OpenRouter key (they start with sk-or-)."; input.focus(); return; }
       state.settings.provider = p;
       state.settings.keys[p] = v;
       save.settings(); updateSubtitle(); renderAll(); ui.input.focus();
@@ -2495,10 +2478,11 @@ function renderEmpty() {
     const link = (p, t) => el("a", { href: PROVIDERS[p].keyLink, target: "_blank", rel: "noopener" }, t);
     wrap.append(
       el("h2", {}, "Add an API key"),
-      el("p", { class: "lede" }, "Paste a Groq or OpenRouter key. It's saved only on this device."),
+      el("p", { class: "lede" }, state.settings.hadGroqKey ? "Mini Agent now runs on OpenRouter (Kimi, Claude, GPT and more). Paste an OpenRouter key; it's saved only on this device."
+        : "Paste an OpenRouter key. It's saved only on this device."),
       el("div", { class: "key-card" }, input, el("button", { class: "btn-primary", type: "button", onclick: saveKey }, "Continue")),
       error,
-      el("p", { class: "footnote" }, "Get a key from ", link("groq", "Groq"), " (free tier) or ", link("openrouter", "OpenRouter"), "."));
+      el("p", { class: "footnote" }, "Get a key at ", link("openrouter", "OpenRouter"), ". Add a few dollars of credit; a typical task costs a few cents to about 50 cents depending on the model."));
   } else {
     wrap.append(
       el("h2", {}, "What can I help with?"),
@@ -2526,8 +2510,8 @@ function updateSendState() {
 function updateSubtitle() {
   ui.version.textContent = "v" + APP_VERSION;
   ui.subtitle.textContent = !apiKey() ? "No key yet"
-    : debateReady() ? `${provider().name} ⇄ ${PROVIDERS[otherProvider()].name}, debating`
-    : `${provider().name}, ${currentModel().split("/").pop()}`;
+    : debateReady() ? `${modelName(mainModel())} ⇄ ${modelName(reviewModel())}, debating`
+    : `${modelName(mainModel())} on OpenRouter`;
 }
 
 // ---------------------------------------------------------------------------
@@ -3004,7 +2988,6 @@ const f = {
   debate: document.getElementById("debateInput"),
   memory: document.getElementById("memoryInput"),
   relay: document.getElementById("relayInput"),
-  seg: document.getElementById("providerSeg"),
   models: document.getElementById("modelList"),
 };
 let draft = null;
@@ -3026,7 +3009,7 @@ function renderChoices(kind) {
   const P = PROVIDERS[draft.provider];
   const current = draft[kind][draft.provider] || c.def(P);
   const known = c.list(P).some(([id]) => id === current);
-  const choose = (id) => { draft[kind][draft.provider] = id; c.other().value = ""; renderChoices(kind); };
+  const choose = (id) => { draft[kind][draft.provider] = id; c.other().value = ""; renderChoices(kind); if (kind === "models") renderDebateFoot(); };
   c.box().replaceChildren(...c.list(P).map(([id, label]) => el("button", { class: "cell cell-choice", type: "button", role: "radio",
     "aria-checked": String(id === current), onclick: () => choose(id) },
     el("span", { class: "cell-text" }, el("span", {}, id.split("/").pop()), el("span", { class: "cell-sub" }, label)),
@@ -3037,24 +3020,29 @@ function renderModels() { renderChoices("models"); renderChoices("visionModels")
 function showProvider(p) {
   draft.provider = p;
   const P = PROVIDERS[p];
-  for (const b of f.seg.querySelectorAll("button")) b.setAttribute("aria-selected", String(b.dataset.p === p));
   f.key.value = draft.keys[p] || "";
-  f.key.placeholder = P.keyPrefix + "...";
-  document.getElementById("keyFooter").replaceChildren(`Saved only on this device and sent only to ${P.name}. `,
-    el("a", { href: P.keyLink, target: "_blank", rel: "noopener" }, `Get a ${P.name} key`));
-  document.getElementById("relayGroup").hidden = p !== "groq";
-  document.getElementById("forgetBtn").textContent = `Forget ${P.name} key`;
+  f.key.placeholder = "sk-or-...";
+  document.getElementById("keyFooter").replaceChildren("Saved only on this device and sent only to OpenRouter. ",
+    el("a", { href: P.keyLink, target: "_blank", rel: "noopener" }, "Get an OpenRouter key"));
+  document.getElementById("forgetBtn").textContent = "Forget OpenRouter key";
   renderModels();
   renderDebateFoot();
   if (draft.imageModel) renderMediaModels();
 }
+const REVIEW_CHOICES = [["anthropic/claude-sonnet-5.5", "Claude: a careful second opinion"], ["moonshotai/kimi-k3.1-pro", "Kimi"], ["openai/gpt-oss-120b", "GPT-OSS: cheapest"]];
 function renderDebateFoot() {
-  const lead = PROVIDERS[draft.provider], otherId = Object.keys(PROVIDERS).find((p) => p !== draft.provider), other = PROVIDERS[otherId];
-  const missing = !draft.keys[otherId] || !draft.keys[draft.provider];
+  const box = document.getElementById("reviewList"), other = document.getElementById("customReview");
+  const cur = draft.reviewModel;
+  box.replaceChildren(...REVIEW_CHOICES.map(([id, label]) => el("button", { class: "cell cell-choice", type: "button", role: "radio", "aria-checked": String(id === cur),
+    onclick: () => { draft.reviewModel = id; other.value = ""; renderDebateFoot(); } },
+    el("span", { class: "cell-text" }, el("span", {}, id.split("/").pop()), el("span", { class: "cell-sub" }, label)),
+    el("span", { class: "check", "aria-hidden": "true" }, id === cur ? "✓" : ""))));
+  other.value = REVIEW_CHOICES.some(([id]) => id === cur) ? "" : cur;
+  other.oninput = () => { const v = other.value.trim(); draft.reviewModel = v || REVIEW_CHOICES[0][0]; if (v) for (const b of box.querySelectorAll(".cell-choice")) { b.setAttribute("aria-checked", "false"); b.querySelector(".check").textContent = ""; } };
+  const lead = modelName(draft.models.openrouter || PROVIDERS.openrouter.defaultModel), rev = modelName(draft.reviewModel);
   document.getElementById("debateFoot").textContent =
-    `${lead.name} does the work and drafts the answer; ${other.name} checks it. They go back and forth, up to ${DEBATE_ROUNDS} rounds, until they agree. ` +
-    `Slower, and uses more requests from both. Works best when the two use different models.` +
-    (missing ? ` Add ${(n => (/^[AEIOU]/.test(n) ? "an " : "a ") + n)(!draft.keys[otherId] ? other.name : lead.name)} key to use this.` : "");
+    `Your main model (${lead}) does the work and drafts the answer; the reviewer (${rev}) checks it. They go back and forth, up to ${DEBATE_ROUNDS} rounds, until they agree. ` +
+    `Slower, and costs more. Works best when the reviewer is a different model from the main one.`;
 }
 function renderMediaModels() {
   const pick = (boxId, otherId, list, key) => {
@@ -3069,7 +3057,7 @@ function renderMediaModels() {
   };
   pick("imageList", "customImage", IMAGE_MODELS, "imageModel");
   pick("videoList", "customVideo", VIDEO_MODELS, "videoModel");
-  document.getElementById("mediaFoot").textContent = (draft.keys.openrouter ? "" : "Needs an OpenRouter key (you can still chat on Groq). ") +
+  document.getElementById("mediaFoot").textContent =
     "Pictures cost about $0.01 to $0.13 each. Videos cost about $0.03 to $0.40 per second (a 6-second clip is usually $0.30 to $2.40), and it always asks you before making one.";
 }
 function renderMemory() {
@@ -3103,6 +3091,7 @@ function openSettings() {
     visionModels: Object.assign({}, state.settings.visionModels),
     imageModel: state.settings.imageModel,
     videoModel: state.settings.videoModel,
+    reviewModel: state.settings.reviewModel,
   };
   f.key.type = "password";
   document.getElementById("toggleKey").textContent = "Show";
@@ -3120,7 +3109,7 @@ function applySettings() {
   if (!draft) return;
   stashFields();
   const hadKey = !!apiKey();
-  state.settings.provider = draft.provider;
+  state.settings.provider = "openrouter";
   for (const p of Object.keys(PROVIDERS)) {
     state.settings.keys[p] = draft.keys[p] || "";
     state.settings.models[p] = draft.models[p] || PROVIDERS[p].defaultModel;
@@ -3128,6 +3117,7 @@ function applySettings() {
   }
   state.settings.askBeforeCode = f.ask.checked;
   state.settings.debate = f.debate.checked;
+  state.settings.reviewModel = draft.reviewModel || REVIEW_CHOICES[0][0];
   state.settings.memory = f.memory.checked;
   state.settings.imageModel = draft.imageModel || IMAGE_MODELS[0][0];
   state.settings.videoModel = draft.videoModel || VIDEO_MODELS[0][0];
@@ -3142,7 +3132,6 @@ document.getElementById("titleBtn").addEventListener("click", openSettings);
 document.getElementById("settingsDone").addEventListener("click", () => { applySettings(); settingsDlg.close(); });
 settingsDlg.addEventListener("cancel", () => applySettings());
 settingsDlg.addEventListener("click", (e) => { if (e.target === settingsDlg) { applySettings(); settingsDlg.close(); } });
-for (const b of f.seg.querySelectorAll("button")) b.addEventListener("click", () => { stashFields(); showProvider(b.dataset.p); });
 f.key.addEventListener("input", () => {
   const v = f.key.value.trim();
   const p = detectProvider(v);
