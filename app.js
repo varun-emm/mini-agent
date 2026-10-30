@@ -4,7 +4,7 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "4.0.0";
+const APP_VERSION = "4.1.0";
 
 // ---------------------------------------------------------------------------
 // The provider: OpenRouter, which reaches hundreds of models (Kimi, Claude, GPT and more) with one key.
@@ -1948,7 +1948,7 @@ const reduceMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
 // the glow colour (picked from the colours in your animation), and the hue shift:
 // drift = degrees per second the colours slide around the colour wheel (faster as text pours in,
 // and backwards when the spin is backwards), swing = extra degrees each pulse beat pushes them.
-// fps = how fast your animation's own frames play, as a multiple of its original speed (16.7 frames a second):
+// fps = how fast your animation's own frames play, as a multiple of its original speed (25 frames a second):
 // 1x waiting, 2x thinking and writing, 3x backwards while searching or reading, 5x while making something.
 // It never plays slower than 1x or faster than 5x; text pouring in pushes it up a level, and it keeps its
 // pace to the end (fps 0 = keep the current speed).
@@ -1964,8 +1964,9 @@ const LOADER_MOODS = {
   answer: { dir: 1, base: 0.9, shape: "breath", amp: 0.05, hz: 0.9, glow: [60, 130, 255], fps: 2, drift: 30, swing: 10 },
   done: { dir: 1, base: 0, shape: "breath", amp: 0, hz: 0.5, glow: [70, 140, 255], fps: 0, drift: 0, swing: 0 },
 };
-// Your animation, as a strip of its 60 frames (10 across, 6 down), so the app can play it at any speed.
-const SPRITE = { frames: 60, cols: 10, rows: 6, fps: 1000 / 60, min: 1, max: 5 };
+// Your animation, as a strip of its 125 frames (13 across, 10 down), so the app can play it at any speed.
+// Its original speed (1x) is 25 frames a second: one loop every 5 seconds.
+const SPRITE = { frames: 125, cols: 13, rows: 10, fps: 25, min: 1, max: 5 };
 const PULSE_SHAPES = {
   breath: (p) => (1 - Math.cos(2 * Math.PI * p)) / 2 - 0.35,
   inhale: (p) => -Math.pow(Math.sin(Math.PI * p), 3),
