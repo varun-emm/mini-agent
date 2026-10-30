@@ -1,0 +1,9 @@
+.git
+**/node_modules
+workspace
+cli
+api
+tools
+*.md
+.vercel
+.env

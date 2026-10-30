@@ -1,0 +1,12 @@
+{
+  "name": "mini-agent-server",
+  "private": true,
+  "type": "module",
+  "description": "Runs the Mini Agent on a server, for the phone app.",
+  "engines": { "node": ">=22" },
+  "scripts": { "start": "node server.mjs" },
+  "dependencies": {
+    "marked": "18.0.10",
+    "playwright-core": "1.56.0"
+  }
+}

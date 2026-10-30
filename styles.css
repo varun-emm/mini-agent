@@ -754,3 +754,6 @@ body { background: var(--base); }
 .cell { background: transparent; }
 .tool-btn, .search { background: var(--fill); border: 0.5px solid var(--glass-border); }
 .segmented { background: var(--fill); }
+
+.cell-action { color: var(--blue); justify-content: center; font-size: 17px; font-weight: 500; }
+.cell-action.cell-danger { color: var(--red); }

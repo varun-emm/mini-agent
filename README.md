@@ -45,6 +45,32 @@ The spinner is your animation, and it turns and pulses with the work:
 
 The app plays your animation frame by frame from a strip of its 125 frames (`assets/loader-frames.webp`), so it controls the speed and direction. It never plays slower than 1× or faster than 5×: text pouring in pushes it up a level, each finished step gives it a burst, and it turns round instantly instead of slowing through a stop. Its colours slide around the colour wheel (a hue shift) while saturation and transparency stay normal. Speed and colour shift both follow how fast text is arriving, each beat pushes the colours a little further, every finished step gives it a little pop and a quick colour jump, and it eases between moods. When the work is done it swells once and shrinks away.
 
+## Run it on your own server (free)
+
+By default the agent runs inside your phone's browser, so it stops when you close the app. Since v4.2 it can run on your own server instead, so it **keeps working when you close the app**. The server also has **real Python with internet access**, takes screenshots with a real browser, and reads any web page directly.
+
+Your chats stay on your phone. For each message, the app sends the conversation and the files it needs to your server, shows the live progress, and saves the result. Close the app mid-job and the result waits on the server for up to 3 hours; open the app again and it's collected.
+
+### Set it up on Render's free plan (about 15 minutes, no card)
+
+1. Sign up at [render.com](https://render.com) with your GitHub account.
+2. Choose **New → Blueprint**, pick the `mini-agent` repo, and Render reads `render.yaml`.
+3. It asks for two secrets:
+   - `OPENROUTER_API_KEY`: your OpenRouter key. It lives only on the server.
+   - `APP_PASSWORD`: a password you make up. The app signs in with it.
+4. Click **Deploy**. The first build takes about 5–10 minutes. When it's live, copy its address, like `https://mini-agent-xxxx.onrender.com`.
+5. In the app, open **Settings → Server**, paste the address and the password, and tap **Connect**. You can also open the server's address directly: it serves the same app and asks for the password.
+
+### What the free plan is like
+
+- **It naps.** After 15 minutes with no visits it goes to sleep, and the first message after that takes about a minute while it wakes. The status line says so.
+- **It stays awake while it works.** While a job runs, or a finished result is waiting for you, the server keeps itself awake (for up to 3 hours), so the work isn't lost.
+- **It's small:** 512 MB of memory and a tenth of a processor. Python and screenshots are slower than on a laptop, and it runs one job at a time.
+- **Its disk is wiped when it sleeps.** That's why your chats and files stay on your phone, and the server only keeps a job's files until you've collected the result.
+- **Your secrets stay safe.** The agent's Python runs as a separate low-privilege user that can't read your key or password, and pages it opens can't reach the server's internal network.
+
+To run the server somewhere else, the `Dockerfile` works on any host that runs Docker (Railway, Fly.io, Google Cloud Run, a VPS). Set the same two secrets.
+
 ## Built for bigger jobs (v3)
 
 - **A plan you can watch.** For jobs of 3 or more steps, it writes a short plan first. It shows as a checklist under the status line, with each step ticked off as it finishes. Afterwards the plan sits at the top of the steps.
@@ -147,6 +173,7 @@ The model only ever writes text. `app.js` is the **harness** around it:
 | Memory | `memory`, `memorySection()`, `remember`/`forget` tools |
 | Attachments | `attachFiles()`, `renderPending()` |
 | Page reader | `readPage()` (relay, then Jina Reader, then a search model); `api/fetch.js` |
+| Server mode | `server/server.mjs` (sign-in, uploads, jobs, live events), `server/engine.mjs` (the agent, generated from `app.js` by `tools/build-engine.py`), `server/sandbox.mjs` (Python, screenshots); in the app: `runRemoteTurn()`, `followJob()`, `collectResult()` |
 | Debate | `debate()`, `reviewerPrompt()`, `readVerdict()` |
 | Provider | `PROVIDERS` (OpenRouter) and `callLLM()` (OpenAI-style API) |
 | Tool definitions | `TOOLS` (each description tells the model *when* to use the tool) |

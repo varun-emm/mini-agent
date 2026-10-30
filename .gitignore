@@ -2,3 +2,4 @@ workspace/
 __pycache__/
 .vercel/
 .env
+node_modules/

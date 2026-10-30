@@ -4,7 +4,7 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "4.1.0";
+const APP_VERSION = "4.2.0";
 
 // ---------------------------------------------------------------------------
 // The provider: OpenRouter, which reaches hundreds of models (Kimi, Claude, GPT and more) with one key.
@@ -62,6 +62,7 @@ function loadSettings() {
     memory: true,        // remember facts about the user across chats
     imageModel: "google/gemini-3.1-flash-image",   // makes pictures (OpenRouter)
     videoModel: "google/veo-3.1-fast",             // makes videos (OpenRouter)
+    server: { url: "", token: "" },                // your own Mini Agent server (optional): runs the agent there
   };
   // Groq was removed in v4: only the OpenRouter key, model and vision model carry over
   const from = (o) => (o && typeof o.openrouter === "string" ? o.openrouter : "");
@@ -79,6 +80,7 @@ function loadSettings() {
   if (typeof saved.memory === "boolean") s.memory = saved.memory;
   if (typeof saved.imageModel === "string" && saved.imageModel) s.imageModel = saved.imageModel;
   if (typeof saved.videoModel === "string" && saved.videoModel) s.videoModel = saved.videoModel;
+  if (saved.server && typeof saved.server.url === "string") s.server = { url: saved.server.url, token: String(saved.server.token || "") };
   return s;
 }
 
@@ -133,6 +135,9 @@ const currentModel = () => state.speaker || mainModel();
 const visionModel = () => state.settings.visionModels.openrouter || provider().visionModel;
 const reviewModel = () => state.settings.reviewModel || "anthropic/claude-sonnet-5.5";
 const debateReady = () => state.settings.debate && !!apiKey();
+// Connected to your own server: the agent runs there (your OpenRouter key lives on the server)
+const serverOn = () => !!(state.settings.server.url && state.settings.server.token);
+const canRun = () => !!apiKey() || serverOn();
 
 // ---------------------------------------------------------------------------
 // IndexedDB: chats and file bytes live here, on this device only
@@ -185,6 +190,12 @@ const files = {
     db.put("files", { path: key, chat: this.scope, name: path, bytes: bytes.slice().buffer, mtime });
   },
   remove(path) { const key = this.k(path); this.all.delete(key); db.del("files", key); },
+  putTo(chat, path, bytes, mtime = Date.now()) {
+    const key = this.k(path, chat);
+    this.all.set(key, { chat, path, bytes, mtime });
+    db.put("files", { path: key, chat, name: path, bytes: bytes.slice().buffer, mtime });
+  },
+  removeFrom(chat, path) { const key = this.k(path, chat); this.all.delete(key); db.del("files", key); },
   get(path) { return this.all.get(this.k(path)); },
   has(path) { return this.all.has(this.k(path)); },
   paths(chat = this.scope) { return [...this.all.values()].filter((r) => r.chat === chat).map((r) => r.path).sort(); },
@@ -1731,6 +1742,7 @@ async function debate({ question, draft, turnMsg, madeFiles, view, signal }) {
 // One request from the user, start to finish. attached = names of files the user attached to it.
 async function runTurn(text, attached = []) {
   finishSwitch();
+  if (serverOn()) return runRemoteTurn(text, attached);
   const note = attached.length
     ? `\n\n[The user attached ${attached.length === 1 ? "a file" : `${attached.length} files`}: ` +
       attached.map((p) => `${p} (${fileInfo(p).label}${files.has(p) ? `, ${humanSize(files.get(p).bytes.length)}` : ""})`).join(", ") +
@@ -1813,6 +1825,297 @@ async function runTurn(text, attached = []) {
     save.chat();
     renderChatList();
   }
+}
+
+// ---------------------------------------------------------------------------
+// Your own server: the agent runs there, so it keeps working when you close the app.
+// This phone keeps the chats: it sends the conversation and the files a job needs, plays the
+// server's live events through the same view as a local run, and saves the result.
+// ---------------------------------------------------------------------------
+const remote = {
+  base: () => state.settings.server.url.replace(/\/+$/, ""),
+  async call(path, opts = {}) {
+    let res;
+    try {
+      res = await fetch(remote.base() + path, { ...opts, headers: { ...(opts.headers || {}), Authorization: "Bearer " + state.settings.server.token } });
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      throw new AgentError("Couldn't reach your server. Check your internet connection, or wait a minute if it's waking up, then try again.", "network");
+    }
+    if (res.status === 401) {
+      state.settings.server.token = ""; save.settings(); updateSubtitle();
+      throw new AgentError("Your server asked you to sign in again. Open Settings → Server.", "auth");
+    }
+    return res;
+  },
+  async json(path, opts) {
+    const res = await remote.call(path, opts);
+    let data = null;
+    try { data = await res.json(); } catch (_) { /* not JSON */ }
+    if (!res.ok) throw Object.assign(new AgentError((data && data.error) || `Your server answered ${res.status}.`, "server"), { status: res.status, data });
+    return data;
+  },
+  pending: {
+    all() { return store.get("ma.pending", {}) || {}; },
+    get(chat) { return this.all()[chat]; },
+    set(chat, v) { const a = this.all(); if (v) a[chat] = v; else delete a[chat]; store.set("ma.pending", a); },
+  },
+  live: new Map(),          // chat id -> AbortController for this page's view of that chat's job
+};
+
+const hashCache = new Map();  // "chat/path@mtime" -> sha256
+async function sha256Hex(bytes) {
+  const d = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(d)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+// Make sure the server has every file of this chat; returns the list the job needs.
+async function uploadChatFiles(chatId, view) {
+  const list = [];
+  for (const p of files.paths(chatId)) {
+    const f = files.all.get(files.k(p, chatId));
+    const key = `${chatId}/${p}@${f.mtime}`;
+    if (!hashCache.has(key)) hashCache.set(key, await sha256Hex(f.bytes));
+    list.push({ path: p, sha256: hashCache.get(key), size: f.bytes.length, mtime: f.mtime, bytes: f.bytes });
+  }
+  if (!list.length) return [];
+  const { missing } = await remote.json("/api/blobs/check", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ hashes: list.map((x) => x.sha256) }) });
+  const need = list.filter((x) => missing.includes(x.sha256));
+  for (const [i, x] of need.entries()) {
+    view.progress(`Sending ${x.path} to your server${need.length > 1 ? ` (${i + 1} of ${need.length})` : ""}`);
+    const res = await remote.call(`/api/blobs/${x.sha256}`, { method: "PUT", body: x.bytes });
+    if (!res.ok) throw new AgentError(`Couldn't send ${x.path} to your server (${res.status}).`, "server");
+  }
+  return list.map(({ bytes, ...rest }) => rest);
+}
+
+// Replays the server's events into a live view (the same one a local run uses).
+function makeEventPlayer(view) {
+  let think = "", ans = "", form = "";
+  const asks = new Map();
+  return {
+    play(e, jobId) {
+      switch (e.t) {
+        case "wait": think = ""; ans = ""; form = ""; view.waiting(e.model); break;
+        case "think": think += e.d; view.thinking(think, e.n || e.d.length); break;
+        case "draft": view.drafting(e.n || 1); break;
+        case "ans": ans = e.reset ? e.d : ans + e.d; view.answer(ans, e.n || e.d.length); break;
+        case "drop": ans = ""; view.dropAnswer(); break;
+        case "form": form = e.reset ? e.raw : form + e.d; view.forming(e.name, form); break;
+        case "run": view.running(e.name, e.args || {}); break;
+        case "prog": view.progress(e.text); break;
+        case "together": view.together(e.items); break;
+        case "plan": view.plan(e.items); break;
+        case "peek": view.peek(e.src); break;
+        case "step": view.addStep(e.step); break;
+        case "spk": view.speaker(e.name, e.role); break;
+        case "final": view.writingFinal(); break;
+        case "feed": view.feed(e.n); break;
+        case "ask": {
+          // a question for you (video price, run this code?). Shown after a moment, unless a replay
+          // shows it was already answered.
+          const t = setTimeout(async () => {
+            if (!asks.has(e.id)) return;
+            const yes = e.kind === "video" ? await confirmVideo(e.text) : await approveCode(e.text);
+            if (asks.has(e.id)) remote.json(`/api/jobs/${jobId}/answer`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: e.id, yes }) }).catch(() => {});
+          }, 250);
+          asks.set(e.id, t);
+          break;
+        }
+        case "answered": {
+          clearTimeout(asks.get(e.id)); asks.delete(e.id);
+          for (const id of ["askVideo", "approve"]) { const d = document.getElementById(id); if (d.open) d.close(); }
+          break;
+        }
+        default: break;
+      }
+    },
+    partial: () => ans,
+  };
+}
+
+// Reads the server's event stream; reconnects (picking up where it left off) if the connection drops.
+async function followJob(jobId, player, signal) {
+  let next = 0, fails = 0;
+  for (;;) {
+    try {
+      const res = await remote.call(`/api/jobs/${jobId}/events?after=${next}`, { signal });
+      if (res.status === 404) return { lost: true };
+      if (!res.ok || !res.body) throw new Error(`stream ${res.status}`);
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        let i;
+        while ((i = buf.indexOf("\n\n")) >= 0) {
+          const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+          if (!chunk.startsWith("data: ")) continue;
+          const e = JSON.parse(chunk.slice(6));
+          next = e.i + 1; fails = 0;
+          if (e.t === "done") { try { reader.cancel(); } catch (_) { /* closed */ } return { result: e.result }; }
+          player.play(e, jobId);
+        }
+      }
+    } catch (e) {
+      if (signal && signal.aborted) throw e;
+      if (e.code === "auth") throw e;
+      if (document.visibilityState === "hidden") {        // phone locked or app in the background: wait, don't count it
+        await new Promise((r) => document.addEventListener("visibilitychange", r, { once: true }));
+        continue;
+      }
+      if (++fails > 8) throw Object.assign(new AgentError("Lost the connection to your server. The job may still be running: open this chat again later to collect the result.", "network"), { transient: true });
+      await waitFor(Math.min(15000, 1000 * 2 ** fails), signal);
+    }
+  }
+}
+
+// Save a finished job into its chat (open or not): the conversation, files, memory and the answer.
+async function collectResult(chatId, jobId, result) {
+  const chat = chats.list.get(chatId);
+  for (const f of result.files.changed) {
+    const res = await remote.call(`/api/jobs/${jobId}/files/${f.path.split("/").map(encodeURIComponent).join("/")}`);
+    if (res.ok) files.putTo(chatId, f.path, new Uint8Array(await res.arrayBuffer()), f.mtime || Date.now());
+  }
+  for (const p of result.files.removed) files.removeFrom(chatId, p);
+  if (Array.isArray(result.memory) && state.settings.memory) { memory.items = result.memory; memory.save(); }
+  if (chat) {
+    chat.history.splice(0, chat.history.length, ...result.history);
+    while (chat.log.length && chat.log[chat.log.length - 1].transient) chat.log.pop();   // "lost the connection" notes
+    chats.save(chat);
+  }
+  remote.call(`/api/jobs/${jobId}`, { method: "DELETE" }).catch(() => {});
+  remote.pending.set(chatId, null);
+}
+
+async function runRemoteTurn(text, attached = []) {
+  const chat = state.chat;
+  const userEntry = { kind: "user", text, files: attached.length ? attached : undefined };
+  state.log.push(userEntry);
+  renderEntry(userEntry, true);
+  save.chat();                               // the question is kept even if the app closes now
+  const turn = { kind: "agent", text: "", steps: [], files: [], ms: 0 };
+  const view = liveTurn(turn);
+  state.running = true;
+  state.abort = new AbortController();
+  setRunningUI(true);
+  const started = Date.now();
+  let jobId = null;
+  const wake = setTimeout(() => view.progress("Waking your server (free servers nap when idle; this can take a minute)"), 3500);
+  try {
+    view.waiting(mainModel());
+    const fileList = await uploadChatFiles(chat.id, view);
+    const settings = (({ models, visionModels, reviewModel, debate, memory: mem, askBeforeCode, imageModel, videoModel }) =>
+      ({ models, visionModels, reviewModel, debate, memory: mem, askBeforeCode, imageModel, videoModel }))(state.settings);
+    const { id } = await remote.json("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+      chatId: chat.id, text, attached, history: state.history, memory: state.settings.memory ? memory.items : [],
+      settings, tz: Intl.DateTimeFormat().resolvedOptions().timeZone, files: fileList,
+    }) });
+    clearTimeout(wake);
+    jobId = id;
+    remote.pending.set(chat.id, { job: id, at: Date.now() });
+    await streamRemote(chat.id, id, view, turn);
+  } catch (e) {
+    clearTimeout(wake);
+    if (e.name === "AbortError") {
+      if (jobId) { remote.call(`/api/jobs/${jobId}/stop`, { method: "POST" }).catch(() => {}); return; }
+      Object.assign(turn, { text: "", stopped: true, ms: Date.now() - started });
+    } else {
+      if (jobId) remote.pending.set(chat.id, null);
+      Object.assign(turn, { kind: "error", text: e.message, retry: text, retryFiles: attached.length ? attached : undefined, ms: Date.now() - started });
+    }
+    await view.finish();
+    endRemoteRun(chat);
+  }
+}
+
+// Plays a job's events into a live view, then saves the result. Used for a new message and when
+// coming back to a chat whose job was still running (or finished while the app was closed).
+async function streamRemote(chatId, jobId, view, turn) {
+  const player = makeEventPlayer(view);
+  const watching = new AbortController();      // closing this view stops watching, not the job
+  remote.live.set(chatId, watching);
+  const signal = state.abort && state.chat && state.chat.id === chatId ? state.abort.signal : undefined;
+  if (signal) signal.addEventListener("abort", () => remote.call(`/api/jobs/${jobId}/stop`, { method: "POST" }).catch(() => {}), { once: true });
+  try {
+    const r = await followJob(jobId, player, watching.signal);
+    if (r.lost) {
+      remote.pending.set(chatId, null);
+      Object.assign(turn, { kind: "error", text: "Your server restarted before this finished (free servers sleep when idle), so the work was lost. Tap Try again." });
+    } else {
+      await collectResult(chatId, jobId, r.result);
+      const { steps, ...rest } = r.result.turn;
+      Object.assign(turn, rest);
+      turn.steps = steps || turn.steps;
+    }
+  } catch (e) {
+    if (watching.signal.aborted) return;       // switched to another chat: the job carries on, and replays on return
+    Object.assign(turn, { kind: "error", text: e.message, transient: !!e.transient });
+  } finally {
+    if (remote.live.get(chatId) === watching) remote.live.delete(chatId);
+  }
+  const chat = chats.list.get(chatId);
+  if (state.chat && state.chat.id === chatId) {
+    await view.finish();                       // pushes the turn into the open chat's log
+    endRemoteRun(chat);
+  } else if (chat) {                          // the chat was switched away from: save the answer quietly
+    chat.log.push(turn);
+    chats.save(chat);
+    renderChatList();
+  }
+}
+function endRemoteRun(chat) {
+  state.running = false;
+  state.abort = null;
+  setRunningUI(false);
+  if (chat) chats.save(chat);
+  save.chat();
+  renderChatList();
+}
+
+// Coming back to a chat whose job ran on the server: show its progress, or collect the finished result.
+async function resumeRemote(chat) {
+  if (!chat || !serverOn() || remote.live.has(chat.id)) return;
+  const p = remote.pending.get(chat.id);
+  if (!p || state.running) return;
+  const turn = { kind: "agent", text: "", steps: [], files: [], ms: 0 };
+  const view = liveTurn(turn);
+  state.running = true;
+  state.abort = new AbortController();
+  setRunningUI(true);
+  await streamRemote(chat.id, p.job, view, turn);
+}
+
+// Signing in to your server from the start screen (when the app is opened from the server itself)
+function renderServerSignIn(wrap) {
+  const input = el("input", { type: "password", placeholder: "Server password", "aria-label": "Server password", autocomplete: "current-password" });
+  const error = el("p", { class: "field-error", role: "alert" });
+  const go = async () => {
+    error.textContent = "";
+    try { await serverSignIn(state.settings.server.url, input.value); renderAll(); updateSubtitle(); }
+    catch (e) { error.textContent = e.message; input.focus(); }
+  };
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+  wrap.append(el("h2", {}, "Sign in"), el("p", { class: "lede" }, "This is your Mini Agent server. Enter the password you set when you deployed it."),
+    el("div", { class: "key-card" }, input, el("button", { class: "btn-primary", type: "button", onclick: go }, "Sign in")), error);
+}
+async function serverSignIn(url, password) {
+  url = String(url || "").trim().replace(/\/+$/, "");
+  if (!/^https?:\/\/[^/\s]+/i.test(url)) throw new Error("Enter your server's address, like https://mini-agent.onrender.com");
+  if (!password) throw new Error("Enter the password.");
+  let res;
+  try {
+    res = await fetch(url + "/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ password }) });
+  } catch (_) {
+    throw new Error("Couldn't reach that server. Check the address; if it's on a free plan it may take a minute to wake up, so try again.");
+  }
+  let data = {};
+  try { data = await res.json(); } catch (_) { /* not JSON */ }
+  if (!res.ok) throw new Error(data.error || `The server answered ${res.status}.`);
+  state.settings.server = { url, token: data.token };
+  save.settings();
+  return data;
 }
 
 // What a helper's work looks like on the shared status line: "Helper 2: Searching the web for …"
@@ -2462,7 +2765,9 @@ const EXAMPLES = [
 function renderEmpty() {
   const wrap = el("section", { class: "empty" });
   wrap.append(el("img", { class: "empty-mark", src: "assets/loader-still.png", alt: "" }));
-  if (!apiKey()) {
+  if (state.settings.server.url && !state.settings.server.token) {
+    renderServerSignIn(wrap);
+  } else if (!canRun()) {
     const input = el("input", { type: "password", placeholder: "sk-or-...", "aria-label": "OpenRouter API key", spellcheck: "false", autocapitalize: "off", autocomplete: "off" });
     const error = el("p", { class: "field-error", role: "alert" });
     const saveKey = () => {
@@ -2483,7 +2788,8 @@ function renderEmpty() {
         : "Paste an OpenRouter key. It's saved only on this device."),
       el("div", { class: "key-card" }, input, el("button", { class: "btn-primary", type: "button", onclick: saveKey }, "Continue")),
       error,
-      el("p", { class: "footnote" }, "Get a key at ", link("openrouter", "OpenRouter"), ". Add a few dollars of credit; a typical task costs a few cents to about 50 cents depending on the model."));
+      el("p", { class: "footnote" }, "Get a key at ", link("openrouter", "OpenRouter"), ". Add a few dollars of credit; a typical task costs a few cents to about 50 cents depending on the model."),
+      el("p", { class: "footnote" }, "Running your own Mini Agent server? ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); openSettings(); } }, "Connect to it in Settings"), "."));
   } else {
     wrap.append(
       el("h2", {}, "What can I help with?"),
@@ -2510,7 +2816,8 @@ function updateSendState() {
 }
 function updateSubtitle() {
   ui.version.textContent = "v" + APP_VERSION;
-  ui.subtitle.textContent = !apiKey() ? "No key yet"
+  ui.subtitle.textContent = serverOn() ? `${modelName(mainModel())} on your server${state.settings.debate ? `, debating with ${modelName(reviewModel())}` : ""}`
+    : !apiKey() ? (state.settings.server.url ? "Sign in to your server" : "No key yet")
     : debateReady() ? `${modelName(mainModel())} ⇄ ${modelName(reviewModel())}, debating`
     : `${modelName(mainModel())} on OpenRouter`;
 }
@@ -2715,7 +3022,7 @@ function submit(text, withFiles) {
   text = (text || "").trim();
   const attached = withFiles ? withFiles.filter((p) => files.has(p)) : state.pending.slice();
   if ((!text && !attached.length) || state.running) return;
-  if (!apiKey()) {
+  if (!canRun()) {
     if (state.log.length || attached.length) { openSettings(); return; }
     renderAll(); document.querySelector(".empty input")?.focus(); return;
   }
@@ -2796,7 +3103,7 @@ document.addEventListener("drop", (e) => {
 
 ui.form.addEventListener("submit", (e) => {
   e.preventDefault();
-  if (state.running) { state.abort?.abort(); python.kill(); return; }
+  if (state.running) { state.abort?.abort(); if (!serverOn()) python.kill(); return; }
   submit(ui.input.value);
 });
 const coarse = matchMedia("(pointer: coarse)").matches;
@@ -2813,6 +3120,11 @@ document.getElementById("newChatBtn").addEventListener("click", () => newChat())
 // Chat history: open, switch, start and delete conversations
 // ---------------------------------------------------------------------------
 function openChat(chat, animate = true) {
+  if (serverOn() && state.chat && remote.live.has(state.chat.id)) {
+    remote.live.get(state.chat.id).abort();                              // stop watching; the job keeps going on the server
+    remote.live.delete(state.chat.id);
+    state.running = false; state.abort = null; setRunningUI(false);
+  }
   state.pending = []; renderPending();
   state.chat = chat;
   state.history = chat ? chat.history : [];
@@ -2826,6 +3138,7 @@ function openChat(chat, animate = true) {
     switchTimer = setTimeout(finishSwitch, 170);
   } else { clearTimeout(switchTimer); switchTimer = 0; renderAll(); }
   renderChatList();
+  if (chat && serverOn() && remote.pending.get(chat.id)) setTimeout(() => { finishSwitch(); resumeRemote(chat); }, animate ? 200 : 0);
 }
 // The old chat fades out, then the new one is drawn. Sending a message mid-switch finishes it at once.
 let switchTimer = 0;
@@ -2901,6 +3214,7 @@ function timeLabel(ts) {
 }
 const plain = (t) => String(t || "").replace(/[*_`#>|[\]()-]+/g, " ").replace(/\s+/g, " ").trim();
 function chatPreview(c) {
+  if (serverOn() && remote.pending.get(c.id)) return "Working on your server…";
   for (let i = c.log.length - 1; i >= 0; i--) {
     const e = c.log[i];
     if (e.kind !== "user" && e.text) return plain(e.text).slice(0, 80);
@@ -2988,6 +3302,8 @@ const f = {
   ask: document.getElementById("askInput"),
   debate: document.getElementById("debateInput"),
   memory: document.getElementById("memoryInput"),
+  serverUrl: document.getElementById("serverUrl"),
+  serverPass: document.getElementById("serverPass"),
   relay: document.getElementById("relayInput"),
   models: document.getElementById("modelList"),
 };
@@ -3023,7 +3339,9 @@ function showProvider(p) {
   const P = PROVIDERS[p];
   f.key.value = draft.keys[p] || "";
   f.key.placeholder = "sk-or-...";
-  document.getElementById("keyFooter").replaceChildren("Saved only on this device and sent only to OpenRouter. ",
+  document.getElementById("keyFooter").replaceChildren(serverOn()
+    ? "Not needed while you're connected to your server: the key lives there. A key here is only used if you disconnect. "
+    : "Saved only on this device and sent only to OpenRouter. ",
     el("a", { href: P.keyLink, target: "_blank", rel: "noopener" }, "Get an OpenRouter key"));
   document.getElementById("forgetBtn").textContent = "Forget OpenRouter key";
   renderModels();
@@ -3060,6 +3378,17 @@ function renderMediaModels() {
   pick("videoList", "customVideo", VIDEO_MODELS, "videoModel");
   document.getElementById("mediaFoot").textContent =
     "Pictures cost about $0.01 to $0.13 each. Videos cost about $0.03 to $0.40 per second (a 6-second clip is usually $0.30 to $2.40), and it always asks you before making one.";
+}
+function renderServer() {
+  const on = serverOn(), url = state.settings.server.url;
+  f.serverUrl.value = url || "";
+  f.serverPass.value = "";
+  document.getElementById("serverPassCell").hidden = on;
+  document.getElementById("serverBtn").textContent = on ? "Disconnect" : "Connect";
+  document.getElementById("serverBtn").classList.toggle("cell-danger", on);
+  document.getElementById("serverFoot").textContent = on
+    ? `Connected. The agent runs on your server and keeps working when you close the app. Your OpenRouter key lives on the server.`
+    : "Run the agent on your own free server, so it keeps working when you close the app. Enter its address and the password you set. See the README.";
 }
 function renderMemory() {
   const rows = document.getElementById("memoryRows");
@@ -3101,6 +3430,7 @@ function openSettings() {
   f.debate.checked = state.settings.debate;
   f.memory.checked = state.settings.memory;
   renderMemory();
+  renderServer();
   renderMediaModels();
   f.relay.value = state.settings.relayUrl;
   renderSettingsFiles();
@@ -3162,6 +3492,17 @@ document.getElementById("forgetBtn").addEventListener("click", () => {
   renderDebateFoot();
 });
 document.getElementById("forgetMemoryBtn").addEventListener("click", () => { memory.clear(); renderMemory(); });
+document.getElementById("serverBtn").addEventListener("click", async () => {
+  const foot = document.getElementById("serverFoot");
+  if (serverOn()) { state.settings.server = { url: state.settings.server.url, token: "" }; save.settings(); renderServer(); updateSubtitle(); return; }
+  foot.textContent = "Connecting… (a sleeping free server can take a minute to wake up)";
+  try {
+    const r = await serverSignIn(f.serverUrl.value, f.serverPass.value);
+    renderServer();
+    foot.textContent = `Connected to your server (version ${r.version}). The agent now runs there.`;
+    updateSubtitle();
+  } catch (e) { foot.textContent = e.message; }
+});
 document.getElementById("clearFilesBtn").addEventListener("click", () => {
   for (const p of files.paths()) files.remove(p);
   renderSettingsFiles();
@@ -3172,8 +3513,16 @@ document.getElementById("clearFilesBtn").addEventListener("click", () => {
 // Boot
 // ---------------------------------------------------------------------------
 (async () => {
+  // opened from your own Mini Agent server: use it (sign in on the start screen if needed)
+  if (!/github\.io$/.test(location.hostname) && location.protocol.startsWith("http") && !state.settings.server.url) {
+    try {
+      const r = await fetch("/api/health");
+      if (r.ok && (await r.json()).version) { state.settings.server = { url: location.origin, token: "" }; save.settings(); }
+    } catch (_) { /* a plain static host */ }
+  }
   updateSubtitle();
   const current = await loadStorage();
   openChat(current, false);
   updateSendState();
+  document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && state.chat) resumeRemote(state.chat); });
 })();

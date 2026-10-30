@@ -1,0 +1,20 @@
+# One-click setup on Render (free plan): New -> Blueprint -> pick this repo.
+# You'll be asked for OPENROUTER_API_KEY and APP_PASSWORD.
+services:
+  - type: web
+    name: mini-agent
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: APP_PASSWORD
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: https://varun-emm.github.io
+      - key: MAX_JOBS
+        value: "1"

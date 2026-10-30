@@ -14,7 +14,7 @@
   <link rel="icon" type="image/png" href="assets/icon.png">
   <link rel="apple-touch-icon" href="assets/icon.png">
   <link rel="preload" href="assets/loader-frames.webp" as="image">
-  <link rel="stylesheet" href="styles.css?v=4.1.0">
+  <link rel="stylesheet" href="styles.css?v=4.2.0">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -85,6 +85,22 @@
       <button class="bar-btn strong" id="settingsDone" type="button">Done</button>
     </div>
     <div class="sheet-scroll">
+      <div class="group">
+        <div class="group-head">Server</div>
+        <div class="cells">
+          <label class="cell cell-input">
+            <span class="sr-only">Server address</span>
+            <input id="serverUrl" type="url" placeholder="https://your-agent.onrender.com" spellcheck="false" autocapitalize="off" autocomplete="url">
+          </label>
+          <label class="cell cell-input" id="serverPassCell">
+            <span class="sr-only">Server password</span>
+            <input id="serverPass" type="password" placeholder="Password" autocomplete="current-password">
+          </label>
+          <button type="button" class="cell cell-action" id="serverBtn">Connect</button>
+        </div>
+        <div class="group-foot" id="serverFoot"></div>
+      </div>
+
       <div class="group">
         <div class="group-head">OpenRouter key</div>
         <div class="cells">
@@ -265,6 +281,6 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-  <script src="app.js?v=4.1.0"></script>
+  <script src="app.js?v=4.2.0"></script>
 </body>
 </html>
