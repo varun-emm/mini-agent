@@ -867,6 +867,7 @@ const TOOL_FUNCTIONS = {
     return `Plan updated: ${done} of ${plan.length} steps done. Keep it current as you work.`;
   },
   async remember({ fact }) {
+    if (state.incognito) return "This is an incognito chat, so nothing was saved.";
     if (!state.settings.memory) return "Memory is turned off in Settings, so nothing was saved.";
     return memory.add(fact) ? `Saved to memory: ${String(fact).trim()}` : "Already in memory.";
   },
@@ -938,7 +939,7 @@ const TOOLS = [
 // Who gets which tools
 const MEMORY_TOOLS = new Set(["remember", "forget"]);
 const MEDIA_TOOLS = new Set(["generate_image", "generate_video"]);
-const leadTools = () => TOOLS.filter((t) => state.settings.memory || !MEMORY_TOOLS.has(t.function.name));
+const leadTools = () => TOOLS.filter((t) => (state.settings.memory && !state.incognito) || !MEMORY_TOOLS.has(t.function.name));
 const helperTools = () => TOOLS.filter((t) => !["delegate", "update_plan", "remember", "forget", "generate_video"].includes(t.function.name));
 // lookups that can safely run at the same time (they don't change files)
 const PARALLEL_SAFE = new Set(["web_search", "fetch_webpage", "calculator", "read_file", "list_files", "get_current_time", "delegate", "generate_image"]);
@@ -1093,6 +1094,7 @@ const fmtDuration = (ms) => {
 // System prompt + context management
 // ---------------------------------------------------------------------------
 function memorySection() {
+  if (state.incognito) return "\nThis is an incognito chat: it isn't saved, and memory is off. Don't save anything about the user.\n";
   if (!state.settings.memory) return "";
   const facts = memory.items.map((m) => `- ${m.text}`).join("\n");
   return `
@@ -1571,4 +1573,4 @@ async function runTurnOnServer(job, view) {
 }
 
 export { APP_VERSION_ENGINE, describe, fileInfo, humanSize, cleanPath, PROVIDERS, TOOLS, executeTool, helperView, thoughtSnippet, debate, modelName, stepDetail, truncate };
-const APP_VERSION_ENGINE = "5.0.0";
+const APP_VERSION_ENGINE = "5.1.0";

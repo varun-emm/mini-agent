@@ -4,7 +4,7 @@ A personal AI agent that runs in your browser on [OpenRouter](https://openrouter
 
 **Open it:** https://varun-emm.github.io/mini-agent/ (after the one-time setup below)
 
-The version number is shown next to the title. See [CHANGELOG.md](CHANGELOG.md) for what changed in each one.
+The version number and its name (5.1 is "Astra") are shown next to the title. See [CHANGELOG.md](CHANGELOG.md) for what changed in each one.
 
 ## What it can do
 
@@ -44,6 +44,15 @@ The spinner is your animation, and it turns and pulses with the work:
 | Writing the answer | clockwise | 2× | gentle beat on each burst of words | blue | slides gently |
 
 The spinner is the rainbow spiral that draws itself (back in v5 after the blue swirl of v4.1). The app plays it frame by frame from a strip of its 60 frames (`assets/loader-frames.webp`), so it controls the speed and direction. It never plays slower than 1× or faster than 5×: text pouring in pushes it up a level, each finished step gives it a burst, and it turns round instantly instead of slowing through a stop. Its colours slide around the colour wheel (a hue shift) while saturation and transparency stay normal. Speed and colour shift both follow how fast text is arriving, each beat pushes the colours a little further, every finished step gives it a little pop and a quick colour jump, and it eases between moods. When the work is done it swells once and shrinks away.
+
+## Look and controls (v5.1)
+
+- **Credit used** shows under the name: on OpenRouter, how much of all the credit you've bought is spent; on UberLLM (which only reports a balance), how much you've used since your last top-up. Hover or long-press for the dollar amounts. It updates after every reply.
+- **Brain button** (left of Send): switch between your provider's suggested models in one tap; "More models in Settings" for anything else.
+- **Incognito** (hat button, top right): a chat that isn't saved to your history or this device and doesn't read or change memory. Tap again, or open another chat, and it's gone.
+- **Menu** (three lines, top left): your chats, **New chat** and Settings.
+- **Settings → Font:** Slab Serif (default), Sans, System, Serif, Rounded or Mono. **Settings → Background:** black (default) or a dark pastel: lavender, sage, rose, slate, peach or teal. The app is always dark.
+- On phones the header stays at the top when the keyboard opens: the app shrinks to the space above the keyboard instead of sliding up.
 
 ## Two providers: OpenRouter and UberLLM (v5)
 

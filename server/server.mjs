@@ -339,6 +339,51 @@ function serveStatic(req, res, urlPath) {
   fs.createReadStream(full).pipe(res);
 }
 
+// How much provider credit is used, for the bar under the app's name (the server asks with its own key).
+const OR_BASE = (process.env.OPENROUTER_BASE || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+const ULL_BASE = (process.env.UBERLLM_BASE || "https://api.uberllm.dev/v1").replace(/\/+$/, "");
+async function credits(pid) {
+  if (!KEYS[pid]) pid = HAVE[0];
+  if (!pid) return { provider: null };
+  const auth = { Authorization: `Bearer ${KEYS[pid]}` };
+  const timeout = AbortSignal.timeout(15000);
+  if (pid === "openrouter") {
+    try {
+      const r = await fetch(`${OR_BASE}/credits`, { headers: auth, signal: timeout });
+      if (r.ok) { const d = (await r.json()).data || {}; if (Number(d.total_credits) > 0) return { provider: pid, total: Number(d.total_credits), used: Number(d.total_usage) || 0 }; }
+    } catch (_) { /* try the key's own numbers */ }
+    const r = await fetch(`${OR_BASE}/key`, { headers: auth, signal: timeout });
+    const d = r.ok ? (await r.json()).data || {} : {};
+    return d.limit ? { provider: pid, total: Number(d.limit), used: Number(d.usage) || 0 } : { provider: pid, used: Number(d.usage) || 0 };
+  }
+  const r = await fetch(ULL_BASE.replace(/\/v1$/, "") + "/mcp", { method: "POST", signal: timeout,
+    headers: { ...auth, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "balance", arguments: {} } }) });
+  let t = await r.text();
+  if (!t.trim().startsWith("{")) t = (t.split("\n").filter((l) => l.startsWith("data:")).pop() || "").slice(5);
+  const result = (JSON.parse(t || "{}").result) || {};
+  return { provider: pid, ...readBalance(result) };
+}
+// UberLLM's balance tool answers in words or JSON; find the spendable amount plus anything held for running jobs
+function readBalance(result) {
+  const num = (v) => (typeof v === "number" ? v : typeof v === "string" && /^\$?\d/.test(v) ? Number(v.replace(/[$,]/g, "")) : NaN);
+  const pick = (o) => {
+    if (!o || typeof o !== "object") return null;
+    let avail = NaN, held = 0;
+    for (const [k, v] of Object.entries(o)) {
+      if (/avail|spend|balance|credit/i.test(k) && !/held|hold|reserved/i.test(k) && Number.isFinite(num(v)) && !Number.isFinite(avail)) avail = num(v);
+      if (/held|hold|reserved/i.test(k) && Number.isFinite(num(v))) held = num(v);
+    }
+    return Number.isFinite(avail) ? avail + held : null;
+  };
+  const sc = result.structuredContent;
+  let b = pick(sc) ?? pick(sc && sc.balance);
+  const text = (result.content || []).map((c) => c.text || "").join("\n");
+  if (b === null) { try { const j = JSON.parse(text); b = pick(j) ?? pick(j.balance); } catch (_) { /* words */ } }
+  if (b === null) { const m = text.match(/\$\s*([\d,]+(?:\.\d+)?)/) || text.match(/([\d,]+\.\d+)/); if (m) b = Number(m[1].replace(/,/g, "")); }
+  return typeof b === "number" ? { balance: b } : {};
+}
+
 // what the app shows in Settings: version, brain, and which providers this server has keys for
 const about = () => ({ version: VERSION, providers: HAVE, ...brain.info() });
 
@@ -380,6 +425,9 @@ const server = http.createServer(async (req, res) => {
     if (!tokenOk(auth.replace(/^Bearer\s+/i, ""))) return send(res, 401, { error: "Sign in again." });
 
     if (p === "/api/me") return send(res, 200, { ok: true, ...about() });
+    if (p === "/api/credits") {
+      try { return send(res, 200, await credits(String(url.searchParams.get("provider") || ""))); } catch (e) { return send(res, 502, { error: e.message }); }
+    }
     if (p === "/api/blobs/check" && req.method === "POST") {
       const { hashes } = await readJSON(req, 200000);
       const missing = (Array.isArray(hashes) ? hashes : []).filter((h) => /^[a-f0-9]{64}$/.test(h) && !fs.existsSync(blobPath(h)));

@@ -4,7 +4,9 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "5.0.0";
+const APP_VERSION = "5.1.0";
+// Each release also gets a name, shown next to the number. Names so far: 5.1 Astra (next ones: Sol, Opus, Fable).
+const VERSION_NAME = "Astra";
 
 // ---------------------------------------------------------------------------
 // The providers: OpenRouter and UberLLM. Both reach many models (Kimi, Claude, GPT and more) with one key
@@ -148,6 +150,7 @@ const state = {
   history: [],         // what the model sees (without the system prompt)
   log: [],             // what the chat shows
   running: false,
+  incognito: false,    // the open (or about-to-start) chat isn't saved and doesn't use memory
   abort: null,
   speaker: null,       // during a debate, the model that's talking right now (null = the main model from Settings)
   pending: [],         // files attached in the composer, waiting to be sent
@@ -215,13 +218,14 @@ const files = {
     if (!this.scope) return;
     const key = this.k(path);
     this.all.set(key, { chat: this.scope, path, bytes, mtime });
-    db.put("files", { path: key, chat: this.scope, name: path, bytes: bytes.slice().buffer, mtime });
+    if (!this.secret.has(this.scope)) db.put("files", { path: key, chat: this.scope, name: path, bytes: bytes.slice().buffer, mtime });
   },
+  secret: new Set(),   // incognito chats: their files are never written to storage
   remove(path) { const key = this.k(path); this.all.delete(key); db.del("files", key); },
   putTo(chat, path, bytes, mtime = Date.now()) {
     const key = this.k(path, chat);
     this.all.set(key, { chat, path, bytes, mtime });
-    db.put("files", { path: key, chat, name: path, bytes: bytes.slice().buffer, mtime });
+    if (!this.secret.has(chat)) db.put("files", { path: key, chat, name: path, bytes: bytes.slice().buffer, mtime });
   },
   removeFrom(chat, path) { const key = this.k(path, chat); this.all.delete(key); db.del("files", key); },
   get(path) { return this.all.get(this.k(path)); },
@@ -249,6 +253,7 @@ const chats = {
     return chat;
   },
   save(chat, touch = true) {
+    if (chat.incognito) return;            // incognito chats live only in this tab, and vanish when you leave them
     if (touch) chat.updated = Date.now();
     if (db.handle) db.put("chats", chat);
     else store.set("ma.chats", [...this.list.values()]);   // fallback when IndexedDB isn't available
@@ -258,7 +263,7 @@ const chats = {
     files.removeChat(id);
     if (db.handle) db.del("chats", id); else store.set("ma.chats", [...this.list.values()]);
   },
-  sorted() { return [...this.list.values()].sort((a, b) => b.updated - a.updated); },
+  sorted() { return [...this.list.values()].filter((c) => !c.incognito).sort((a, b) => b.updated - a.updated); },
 };
 
 const save = {
@@ -1346,6 +1351,7 @@ const TOOL_FUNCTIONS = {
     return `Plan updated: ${done} of ${plan.length} steps done. Keep it current as you work.`;
   },
   async remember({ fact }) {
+    if (state.incognito) return "This is an incognito chat, so nothing was saved.";
     if (!state.settings.memory) return "Memory is turned off in Settings, so nothing was saved.";
     return memory.add(fact) ? `Saved to memory: ${String(fact).trim()}` : "Already in memory.";
   },
@@ -1418,7 +1424,7 @@ const TOOLS = [
 // Who gets which tools
 const MEMORY_TOOLS = new Set(["remember", "forget"]);
 const MEDIA_TOOLS = new Set(["generate_image", "generate_video"]);
-const leadTools = () => TOOLS.filter((t) => state.settings.memory || !MEMORY_TOOLS.has(t.function.name));
+const leadTools = () => TOOLS.filter((t) => (state.settings.memory && !state.incognito) || !MEMORY_TOOLS.has(t.function.name));
 const helperTools = () => TOOLS.filter((t) => !["delegate", "update_plan", "remember", "forget", "generate_video"].includes(t.function.name));
 // lookups that can safely run at the same time (they don't change files)
 const PARALLEL_SAFE = new Set(["web_search", "fetch_webpage", "calculator", "read_file", "list_files", "get_current_time", "delegate", "generate_image"]);
@@ -1575,6 +1581,7 @@ const fmtDuration = (ms) => {
 // System prompt + context management
 // ---------------------------------------------------------------------------
 function memorySection() {
+  if (state.incognito) return "\nThis is an incognito chat: it isn't saved, and memory is off. Don't save anything about the user.\n";
   if (!state.settings.memory) return "";
   const facts = memory.items.map((m) => `- ${m.text}`).join("\n");
   return `
@@ -2187,7 +2194,7 @@ async function collectResult(chatId, jobId, result) {
     if (res.ok) files.putTo(chatId, f.path, new Uint8Array(await res.arrayBuffer()), f.mtime || Date.now());
   }
   for (const p of result.files.removed) files.removeFrom(chatId, p);
-  if (Array.isArray(result.memory) && state.settings.memory) { memory.items = result.memory; memory.save(); }
+  if (Array.isArray(result.memory) && state.settings.memory && !(chat && chat.incognito)) { memory.items = result.memory; memory.save(); }
   if (chat) {
     chat.history.splice(0, chat.history.length, ...result.history);
     while (chat.log.length && chat.log[chat.log.length - 1].transient) chat.log.pop();   // "lost the connection" notes
@@ -2215,9 +2222,9 @@ async function runRemoteTurn(text, attached = []) {
     view.waiting(mainModel());
     const fileList = await uploadChatFiles(chat.id, view);
     const settings = (({ provider: pv, models, visionModels, imageModels, videoModels, reviewModel, debate, memory: mem, askBeforeCode }) =>
-      ({ provider: pv, models, visionModels, imageModels, videoModels, reviewModel, debate, memory: mem, askBeforeCode }))(state.settings);
+      ({ provider: pv, models, visionModels, imageModels, videoModels, reviewModel, debate, memory: mem && !chat.incognito, askBeforeCode }))(state.settings);
     const { id } = await remote.json("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-      chatId: chat.id, text, attached, history: state.history, memory: state.settings.memory ? memory.items : [],
+      chatId: chat.id, text, attached, history: state.history, memory: state.settings.memory && !chat.incognito ? memory.items : [],
       settings, tz: Intl.DateTimeFormat().resolvedOptions().timeZone, files: fileList,
     }) });
     clearTimeout(wake);
@@ -2324,6 +2331,7 @@ async function serverSignIn(url, password) {
   state.settings.server = { url, token: data.token };
   save.settings();
   serverInfo = data;
+  setTimeout(() => refreshCredit(true), 0);
   return data;
 }
 // What your server says about itself: its version, which brain runs the agent and which provider keys it has
@@ -3005,7 +3013,7 @@ function renderEmpty() {
       if (!p) { error.textContent = v.startsWith("gsk_") ? "That's a Groq key. myGPT runs on OpenRouter or UberLLM: get a key at openrouter.ai (sk-or-...) or uberllm.dev (ull_...)." : "That doesn't look like an OpenRouter key (sk-or-...) or an UberLLM key (ull_...)."; input.focus(); return; }
       state.settings.provider = p;
       state.settings.keys[p] = v;
-      save.settings(); updateSubtitle(); renderAll(); ui.input.focus();
+      save.settings(); updateSubtitle(); renderAll(); ui.input.focus(); refreshCredit(true);
     };
     input.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); saveKey(); } });
     input.addEventListener("input", () => { error.textContent = ""; });
@@ -3017,6 +3025,10 @@ function renderEmpty() {
       error,
       el("p", { class: "footnote" }, "Get a key at ", link("openrouter", "OpenRouter"), " or ", link("uberllm", "UberLLM"), ". Add a few dollars of credit; a typical task costs a few cents to about 50 cents depending on the model."),
       el("p", { class: "footnote" }, "Running your own myGPT server? ", el("a", { href: "#", onclick: (e) => { e.preventDefault(); openSettings(); } }, "Connect to it in Settings"), "."));
+  } else if (state.incognito) {
+    wrap.append(
+      el("h2", {}, "Incognito chat"),
+      el("p", { class: "lede" }, "This chat isn't saved to your history or this device, and memory is off: nothing it learns is kept. It's gone when you leave it."));
   } else {
     wrap.append(
       el("h2", {}, "What can I help with?"),
@@ -3037,17 +3049,121 @@ function setRunningUI(running) {
   ui.send.classList.toggle("stop", running);
   ui.send.setAttribute("aria-label", running ? "Stop" : "Send");
   updateSendState();
+  if (!running) setTimeout(() => refreshCredit(true), 1500);   // the job just spent some credit
 }
 function updateSendState() {
   ui.send.disabled = !state.running && !ui.input.value.trim() && !state.pending.length;
 }
+// Under the name: how much of your credit is used (or what's missing), and a tag in incognito chats.
 function updateSubtitle() {
-  ui.version.textContent = "v" + APP_VERSION;
-  ui.subtitle.textContent = serverOn() ? `${modelName(mainModel())} on your server${serverInfo && serverInfo.brain === "opencode" ? " (opencode)" : ""}${state.settings.debate ? `, debating with ${modelName(reviewModel())}` : ""}`
-    : !apiKey() ? (state.settings.server.url ? "Sign in to your server" : "No key yet")
-    : debateReady() ? `${modelName(mainModel())} ⇄ ${modelName(reviewModel())}, debating`
-    : `${modelName(mainModel())} on ${provider().name}`;
+  ui.version.textContent = `v${APP_VERSION} · ${VERSION_NAME}`;
+  const parts = [];
+  if (!canRun()) parts.push(el("span", {}, state.settings.server.url && !state.settings.server.token ? "Sign in to your server" : "No key yet"));
+  else {
+    const c = credit.info && credit.pid === providerId() ? credit.info : null;
+    if (c && typeof c.usedPct === "number") {
+      const pct = Math.max(0, Math.min(100, c.usedPct));
+      parts.push(el("span", { class: `credit${pct >= 90 ? " low" : pct >= 75 ? " warn" : ""}`, title: c.detail || "" },
+        el("span", { class: "credit-bar", style: `--used:${pct.toFixed(1)}%` }, el("i")),
+        `${pct < 10 && pct > 0 ? pct.toFixed(1) : Math.round(pct)}% credit used`));
+    } else if (c && c.text) parts.push(el("span", { class: "credit", title: c.detail || "" }, c.text));
+  }
+  if (state.incognito) parts.push(el("span", { class: "incognito-tag" }, "Incognito"));
+  ui.subtitle.replaceChildren(...parts);
+  const ib = document.getElementById("incognitoBtn");
+  ib.setAttribute("aria-pressed", String(!!state.incognito));
+  ib.setAttribute("aria-label", state.incognito ? "Leave incognito" : "Incognito chat");
+  ui.input.placeholder = state.incognito ? "Incognito chat" : "Ask anything";
 }
+
+// ---------------------------------------------------------------------------
+// Credit: how much of your provider credit is used, shown under the name.
+//   OpenRouter: what you've used of everything you've bought (its /credits).
+//   UberLLM only tells the balance, so it's what you've used since your last top-up (the highest balance seen).
+//   Connected to your server: the server asks with its key.
+// ---------------------------------------------------------------------------
+const credit = { info: null, pid: null, at: 0, busy: false };
+const usd = (x) => `$${x >= 100 ? x.toFixed(0) : x.toFixed(2)}`;
+function creditFrom(raw, pid) {
+  if (!raw) return null;
+  if (typeof raw.total === "number" && raw.total > 0 && typeof raw.used === "number") {
+    return { usedPct: (raw.used / raw.total) * 100, detail: `${usd(raw.used)} of ${usd(raw.total)} used on ${PROVIDERS[pid].name}` };
+  }
+  if (typeof raw.balance === "number") {
+    if (raw.balance <= 0) return { usedPct: 100, detail: `No credit left on ${PROVIDERS[pid].name}. Top up at uberllm.dev` };
+    const bases = store.get("ma.creditBase", {}) || {};
+    const key = (serverOn() ? "server:" : "") + pid;
+    if (!(bases[key] >= raw.balance)) { bases[key] = raw.balance; store.set("ma.creditBase", bases); }   // a top-up (or the first look)
+    const base = bases[key];
+    if (base > 0) return { usedPct: ((base - raw.balance) / base) * 100, detail: `${usd(raw.balance)} left of ${usd(base)} since your last top-up on ${PROVIDERS[pid].name}` };
+    return { text: `${usd(raw.balance)} left`, detail: "" };
+  }
+  if (typeof raw.used === "number") return { text: `${usd(raw.used)} used`, detail: `Spent so far on ${PROVIDERS[pid].name}` };
+  return null;
+}
+// UberLLM's balance comes from its MCP server's "balance" tool; the answer's wording isn't fixed, so read numbers by name
+function readBalance(result) {
+  const pick = (o) => {
+    if (!o || typeof o !== "object") return null;
+    const num = (v) => (typeof v === "number" ? v : typeof v === "string" && /^\$?\d/.test(v) ? Number(v.replace(/[$,]/g, "")) : NaN);
+    let avail = NaN, held = 0;
+    for (const [k, v] of Object.entries(o)) {
+      if (/avail|spend|balance|credit/i.test(k) && !/held|hold|reserved/i.test(k) && Number.isFinite(num(v)) && !Number.isFinite(avail)) avail = num(v);
+      if (/held|hold|reserved/i.test(k) && Number.isFinite(num(v))) held = num(v);
+    }
+    return Number.isFinite(avail) ? avail + held : null;
+  };
+  const sc = result && result.structuredContent;
+  let b = pick(sc) ?? pick(sc && sc.balance);
+  const text = ((result && result.content) || []).map((c) => c.text || "").join("\n");
+  if (b === null) { try { const j = JSON.parse(text); b = pick(j) ?? pick(j.balance); } catch (_) { /* plain words */ } }
+  if (b === null) { const m = text.match(/\$\s*([\d,]+(?:\.\d+)?)/) || text.match(/([\d,]+\.\d+)/); if (m) b = Number(m[1].replace(/,/g, "")); }
+  return b;
+}
+async function fetchCreditDirect(pid, signal) {
+  const key = state.settings.keys[pid];
+  if (!key) return null;
+  if (pid === "openrouter") {
+    const h = { Authorization: "Bearer " + key };
+    try {
+      const r = await fetch(`${OR_API}/credits`, { headers: h, signal });
+      if (r.ok) { const d = (await r.json()).data || {}; if (Number(d.total_credits) > 0) return { total: Number(d.total_credits), used: Number(d.total_usage) || 0 }; }
+    } catch (e) { if (e.name === "AbortError") throw e; }
+    const r = await fetch(`${OR_API}/key`, { headers: h, signal });
+    if (!r.ok) return null;
+    const d = (await r.json()).data || {};
+    return d.limit ? { total: Number(d.limit), used: Number(d.usage) || 0 } : { used: Number(d.usage) || 0 };
+  }
+  const r = await fetch(PROVIDERS.uberllm.api.replace(/\/v1$/, "") + "/mcp", {
+    method: "POST", signal,
+    headers: { Authorization: "Bearer " + key, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "balance", arguments: {} } }),
+  });
+  if (!r.ok) return null;
+  let t = await r.text();
+  if (!t.trim().startsWith("{")) t = (t.split("\n").filter((l) => l.startsWith("data:")).pop() || "").slice(5);
+  const b = readBalance(JSON.parse(t).result);
+  return typeof b === "number" ? { balance: b } : null;
+}
+async function refreshCredit(force = false) {
+  if (!canRun() || credit.busy) return;
+  const pid = providerId();
+  if (!force && credit.pid === pid && Date.now() - credit.at < 20000) return;
+  credit.busy = true;
+  try {
+    let raw = null, used = pid;
+    if (serverOn()) {
+      const r = await fetch(`${state.settings.server.url}/api/credits?provider=${pid}`, { headers: { Authorization: "Bearer " + state.settings.server.token } });
+      if (r.ok) { raw = await r.json(); used = raw.provider || pid; }
+    } else raw = await fetchCreditDirect(pid);
+    credit.info = creditFrom(raw, used);
+    credit.pid = pid;
+    credit.at = Date.now();
+  } catch (_) { /* offline or not allowed: keep what we had */ }
+  finally { credit.busy = false; }
+  updateSubtitle();
+}
+setInterval(() => { if (document.visibilityState === "visible") refreshCredit(); }, 10 * 60000);
 
 // ---------------------------------------------------------------------------
 // File preview sheet
@@ -3240,8 +3356,9 @@ function ensureChat(firstText) {
   if (state.chat) return;
   const chat = chats.create(firstText || "");
   if (!firstText) chat.untitled = true;
+  if (state.incognito) { chat.incognito = true; files.secret.add(chat.id); }
   state.chat = chat; state.history = chat.history; state.log = chat.log; files.scope = chat.id;
-  store.set("ma.currentChat", chat.id);
+  if (!chat.incognito) store.set("ma.currentChat", chat.id);
   chats.save(chat);
 }
 
@@ -3340,7 +3457,9 @@ ui.input.addEventListener("keydown", (e) => {
 function autosize() { ui.input.style.height = "auto"; ui.input.style.height = Math.min(ui.input.scrollHeight, 168) + "px"; }
 ui.input.addEventListener("input", () => { autosize(); updateSendState(); });
 
-document.getElementById("newChatBtn").addEventListener("click", () => newChat());
+// Incognito: a chat that isn't saved to your history or this device, and doesn't use or change memory.
+// Tap again (or open any chat) to leave it; it's gone once you do.
+document.getElementById("incognitoBtn").addEventListener("click", () => newChat(!state.incognito));
 
 
 // ---------------------------------------------------------------------------
@@ -3353,11 +3472,15 @@ function openChat(chat, animate = true) {
     state.running = false; state.abort = null; setRunningUI(false);
   }
   state.pending = []; renderPending();
+  const leaving = state.chat;
+  if (leaving && leaving.incognito && leaving !== chat) { chats.list.delete(leaving.id); files.removeChat(leaving.id); files.secret.delete(leaving.id); }   // gone for good
+  state.incognito = !!(chat ? chat.incognito : state.incognito);
   state.chat = chat;
   state.history = chat ? chat.history : [];
   state.log = chat ? chat.log : [];
   files.scope = chat ? chat.id : null;
-  store.set("ma.currentChat", chat ? chat.id : "");
+  if (!(chat && chat.incognito)) store.set("ma.currentChat", chat ? chat.id : "");
+  updateSubtitle();
   if (animate && !reduceMotion) {
     clearTimeout(switchTimer);
     ui.thread.classList.remove("thread-in");
@@ -3378,11 +3501,13 @@ function finishSwitch() {
   ui.thread.classList.add("thread-in");
 }
 
-function newChat() {
+function newChat(incognito = false) {
   if (state.running) { flashNote("Finish or stop the current reply first."); return; }
   closeDrawer();
-  if (!state.chat) { ui.input.focus(); return; }
+  if (!state.chat && !!state.incognito === incognito) { ui.input.focus(); return; }
+  state.incognito = incognito;
   openChat(null);
+  updateSubtitle();
   ui.input.focus();
 }
 
@@ -3707,6 +3832,7 @@ function openSettings() {
   f.memory.checked = state.settings.memory;
   renderMemory();
   renderServer();
+  renderLook();
   f.relay.value = state.settings.relayUrl;
   renderSettingsFiles();
   settingsDlg.showModal();
@@ -3732,6 +3858,7 @@ function applySettings() {
   draft = null;
   updateSubtitle();
   if (hadKey !== !!apiKey() && !state.log.length) renderAll();
+  refreshCredit(true);
 }
 
 document.getElementById("titleBtn").addEventListener("click", openSettings);
@@ -3785,6 +3912,89 @@ document.getElementById("clearFilesBtn").addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Model picker (the brain button left of Send): the provider's suggested models, one tap to switch
+// ---------------------------------------------------------------------------
+const modelBtn = document.getElementById("modelBtn");
+const modelMenu = document.getElementById("modelMenu");
+function renderModelMenu() {
+  const P = provider(), cur = mainModel();
+  const list = P.models.slice();
+  if (!list.some(([id]) => id === cur)) list.unshift([cur, "Your own pick"]);
+  const pick = (id) => {
+    state.settings.models[providerId()] = id;
+    save.settings();
+    closeModelMenu();
+    updateSubtitle();
+    flashNote(`Now using ${modelName(id)}`);
+  };
+  modelMenu.replaceChildren(
+    el("div", { class: "mm-head" }, `Model · ${serverOn() ? "your server" : P.name}`),
+    ...list.map(([id, label]) => el("button", { type: "button", role: "menuitemradio", "aria-checked": String(id === cur), onclick: () => pick(id) },
+      el("span", { class: "mm-text" }, el("span", { class: "mm-name" }, modelName(id)), el("span", { class: "mm-sub" }, label.replace(/^[^:]+:\s*/, ""))),
+      el("span", { class: "mm-check", "aria-hidden": "true" }, id === cur ? "✓" : ""))),
+    el("hr"),
+    el("button", { type: "button", class: "mm-more", role: "menuitem", onclick: () => { closeModelMenu(); openSettings(); } }, "More models in Settings"));
+}
+function openModelMenu() { renderModelMenu(); modelMenu.hidden = false; modelBtn.setAttribute("aria-expanded", "true"); }
+function closeModelMenu() { modelMenu.hidden = true; modelBtn.setAttribute("aria-expanded", "false"); }
+modelBtn.addEventListener("click", (e) => { e.stopPropagation(); if (modelMenu.hidden) openModelMenu(); else closeModelMenu(); });
+document.addEventListener("click", (e) => { if (!modelMenu.hidden && !modelMenu.contains(e.target)) closeModelMenu(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !modelMenu.hidden) closeModelMenu(); });
+
+// ---------------------------------------------------------------------------
+// Look: the font and the background colour (saved on this device, applied before the page paints)
+// ---------------------------------------------------------------------------
+const FONTS = [["slab", "Slab Serif", "Roboto Slab, the default"], ["sans", "Sans", "Inter"], ["system", "System", "Your phone's own font"],
+  ["serif", "Serif", "Source Serif"], ["rounded", "Rounded", "Nunito"], ["mono", "Mono", "JetBrains Mono"]];
+const FONT_FAMILY = { slab: "'Roboto Slab'", sans: "Inter", system: "-apple-system, system-ui", serif: "'Source Serif 4'", rounded: "Nunito", mono: "'JetBrains Mono'" };
+const BACKGROUNDS = [["black", "Black", "#000000"], ["lavender", "Lavender", "#1D1A29"], ["sage", "Sage", "#172420"], ["rose", "Rose", "#2A1B22"],
+  ["slate", "Slate", "#19202E"], ["peach", "Peach", "#2A2019"], ["teal", "Teal", "#132426"]];
+const look = Object.assign({ font: "slab", bg: "black" }, store.get("ma.look", {}) || {});
+function applyLook() {
+  const root = document.documentElement;
+  if (look.font && look.font !== "slab") root.dataset.font = look.font; else delete root.dataset.font;
+  if (look.bg && look.bg !== "black") root.dataset.bg = look.bg; else delete root.dataset.bg;
+  const bg = (BACKGROUNDS.find(([id]) => id === look.bg) || BACKGROUNDS[0])[2];
+  document.getElementById("themeColor").setAttribute("content", bg);
+}
+function renderLook() {
+  document.getElementById("fontList").replaceChildren(...FONTS.map(([id, name, sub]) => el("button", { class: "cell cell-choice", type: "button", role: "radio",
+    "aria-checked": String(look.font === id), onclick: () => { look.font = id; store.set("ma.look", look); applyLook(); renderLook(); } },
+    el("span", { class: "cell-text" }, el("span", { class: "font-sample", style: `font-family:${FONT_FAMILY[id]}` }, name), el("span", { class: "cell-sub" }, sub)),
+    el("span", { class: "check", "aria-hidden": "true" }, look.font === id ? "✓" : ""))));
+  document.getElementById("bgList").replaceChildren(...BACKGROUNDS.map(([id, name, hex]) => el("button", { class: "swatch", type: "button", role: "radio",
+    "aria-checked": String(look.bg === id), "aria-label": name, title: name, style: `background:${hex}`,
+    onclick: () => { look.bg = id; store.set("ma.look", look); applyLook(); renderLook(); } },
+    el("span", { "aria-hidden": "true" }, look.bg === id ? "✓" : ""))));
+  document.getElementById("bgFoot").textContent = `${(BACKGROUNDS.find(([id]) => id === look.bg) || BACKGROUNDS[0])[1]}. Pure black looks best on iPhone screens and saves battery; the pastels are dark, muted tints.`;
+}
+applyLook();
+
+// ---------------------------------------------------------------------------
+// Keep the app inside the visible part of the screen. On iPhones the keyboard pushes the page up
+// (and the header off the top); instead, the app shrinks to the space above the keyboard.
+// ---------------------------------------------------------------------------
+(() => {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const root = document.documentElement.style;
+  let raf = 0;
+  const fit = () => {
+    raf = 0;
+    root.setProperty("--vv-h", `${Math.round(vv.height)}px`);
+    root.setProperty("--vv-top", `${Math.round(vv.offsetTop)}px`);
+    if (window.scrollY || document.documentElement.scrollTop) window.scrollTo(0, 0);
+  };
+  const soon = () => { if (!raf) raf = requestAnimationFrame(fit); };
+  vv.addEventListener("resize", soon);
+  vv.addEventListener("scroll", soon);
+  window.addEventListener("scroll", soon, { passive: true });
+  ui.input.addEventListener("focus", () => { setTimeout(fit, 50); setTimeout(fit, 350); });
+  ui.input.addEventListener("blur", () => setTimeout(fit, 100));
+  fit();
+})();
+
+// ---------------------------------------------------------------------------
 // Boot
 // ---------------------------------------------------------------------------
 (async () => {
@@ -3797,6 +4007,7 @@ document.getElementById("clearFilesBtn").addEventListener("click", () => {
   }
   updateSubtitle();
   loadServerInfo().then(() => updateSubtitle());
+  refreshCredit(true);
   const current = await loadStorage();
   openChat(current, false);
   updateSendState();

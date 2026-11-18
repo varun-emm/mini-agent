@@ -757,3 +757,112 @@ body { background: var(--base); }
 
 .cell-action { color: var(--blue); justify-content: center; font-size: 17px; font-weight: 500; }
 .cell-action.cell-danger { color: var(--red); }
+
+/* ======================================================================
+   v5.1: always dark, on a solid background you pick (black or a dark pastel),
+   a font you pick (slab serif by default), and a header that stays put when the keyboard opens.
+   ====================================================================== */
+:root, :root[data-bg] {
+  color-scheme: dark;
+  --base: #000000;
+  --bg: var(--base);
+  --grouped: var(--base);
+  --label: #FFFFFF;
+  --label-2: rgba(235, 235, 245, 0.62);
+  --label-3: rgba(235, 235, 245, 0.32);
+  --blue: #0A84FF;
+  --red: #FF453A;
+  --glass: rgba(255, 255, 255, 0.08);
+  --glass-strong: rgba(255, 255, 255, 0.12);
+  --glass-soft: rgba(255, 255, 255, 0.055);
+  --glass-edge: rgba(255, 255, 255, 0.14);
+  --glass-line: rgba(255, 255, 255, 0.08);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --glass-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+  --card-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  --bubble-glass: rgba(40, 130, 255, 0.22);
+  --bubble-border: rgba(90, 170, 255, 0.3);
+  --fill: rgba(255, 255, 255, 0.08);
+  --fill-2: rgba(255, 255, 255, 0.14);
+  --cell: rgba(255, 255, 255, 0.07);
+  --separator: rgba(255, 255, 255, 0.1);
+  --sheet-bg: color-mix(in srgb, var(--base) 82%, #2a2a2e);
+  --font: "Roboto Slab", "Rockwell", "Zilla Slab", Georgia, serif;
+}
+/* dark pastel backgrounds */
+:root[data-bg="lavender"] { --base: #1D1A29; }
+:root[data-bg="sage"] { --base: #172420; }
+:root[data-bg="rose"] { --base: #2A1B22; }
+:root[data-bg="slate"] { --base: #19202E; }
+:root[data-bg="peach"] { --base: #2A2019; }
+:root[data-bg="teal"] { --base: #132426; }
+.sheet, .drawer { --cell: rgba(255, 255, 255, 0.07); }
+.ambient { display: none; }
+body, .chat { background: var(--base); }
+/* fonts */
+:root[data-font="sans"] { --font: Inter, -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+:root[data-font="system"] { --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", system-ui, "Segoe UI", Roboto, sans-serif; }
+:root[data-font="serif"] { --font: "Source Serif 4", Georgia, "Times New Roman", serif; }
+:root[data-font="rounded"] { --font: Nunito, ui-rounded, "SF Pro Rounded", system-ui, sans-serif; }
+:root[data-font="mono"] { --font: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace; }
+:root[data-font="mono"] body { letter-spacing: -0.02em; }
+
+/* the whole app sits in the visible part of the screen (resized by app.js when the keyboard opens),
+   so the header never slides off the top */
+html, body { overflow: hidden; overscroll-behavior: none; }
+.app { position: fixed; left: 0; right: 0; top: var(--vv-top, 0px); height: var(--vv-h, 100dvh); }
+.app.pushed { transform: translateX(min(24px, 4vw)) scale(0.985); }
+
+/* header: name + version, credit underneath */
+.nav { grid-template-columns: 44px 1fr 44px; }
+.nav-ver { margin-left: 7px; }
+.nav-sub-row { margin-top: 2px; }
+.credit { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--label-2); font-variant-numeric: tabular-nums; }
+.credit-bar { width: 38px; height: 4px; border-radius: 2px; background: var(--fill-2); overflow: hidden; }
+.credit-bar i { display: block; height: 100%; width: var(--used, 0%); background: var(--blue); border-radius: 2px; }
+.credit.warn .credit-bar i { background: #FF9F0A; }
+.credit.low .credit-bar i { background: var(--red); }
+.credit.warn, .credit.low { color: var(--label); }
+.incognito-tag { font-size: 12px; color: var(--label); background: var(--fill-2); border-radius: 7px; padding: 0 7px; margin-left: 6px; }
+#incognitoBtn[aria-pressed="true"] { background: var(--label); color: var(--base); }
+
+/* model picker, left of send */
+.model-btn {
+  width: 38px; height: 38px; flex: none; border: 0; border-radius: 50%; background: transparent;
+  color: var(--label-2); display: grid; place-items: center; transition: background 140ms ease, transform 140ms ease, color 140ms ease;
+}
+.model-btn:active, .model-btn[aria-expanded="true"] { background: var(--fill); color: var(--label); }
+.model-btn:active { transform: scale(0.9); }
+.model-btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.model-menu {
+  position: absolute; right: 8px; bottom: calc(100% + 10px); z-index: 7; width: min(300px, calc(100vw - 32px));
+  background: color-mix(in srgb, var(--base) 70%, #3a3a3e); border: 0.5px solid var(--glass-border); border-radius: 18px;
+  -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6); padding: 6px; transform-origin: 90% 100%;
+  animation: menu-in 160ms cubic-bezier(.2, .9, .3, 1.2);
+}
+@keyframes menu-in { from { opacity: 0; transform: scale(0.92) translateY(6px); } }
+.model-menu .mm-head { font-size: 12px; color: var(--label-2); padding: 6px 12px 4px; }
+.model-menu button {
+  width: 100%; display: flex; align-items: center; gap: 10px; border: 0; background: transparent; text-align: left;
+  padding: 10px 12px; border-radius: 12px; color: var(--label);
+}
+.model-menu button:active, .model-menu button:hover { background: var(--fill); }
+.model-menu .mm-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.model-menu .mm-name { font-size: 16px; font-weight: 500; }
+.model-menu .mm-sub { font-size: 12.5px; color: var(--label-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.model-menu .mm-check { color: var(--blue); width: 18px; text-align: center; }
+.model-menu .mm-more { color: var(--blue); font-size: 15px; justify-content: center; }
+.model-menu hr { border: 0; border-top: 0.5px solid var(--separator); margin: 4px 8px; }
+.composer { position: absolute; }
+
+/* background swatches */
+.swatches { display: flex; flex-wrap: wrap; gap: 14px; padding: 14px 16px; }
+.swatch {
+  width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255, 255, 255, 0.22); padding: 0;
+  display: grid; place-items: center; transition: transform 140ms ease;
+}
+.swatch:active { transform: scale(0.9); }
+.swatch[aria-checked="true"] { box-shadow: 0 0 0 2px var(--base), 0 0 0 4px var(--blue); }
+.swatch span { font-size: 18px; color: #fff; }
+.font-sample { font-size: 17px; }
