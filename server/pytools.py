@@ -1,4 +1,4 @@
-"""Trusted helpers for the Mini Agent server: shrink images and turn documents into HTML for screenshots.
+"""Trusted helpers for the myGPT server: shrink images and turn documents into HTML for screenshots.
 
 python3 pytools.py thumb <path> <max_side> <jpeg|png>      -> {"b64", "format", "w", "h"}
 python3 pytools.py shot <path> <max_w> <max_h>             -> {"b64", "w", "h", "cropped"} (JPEG on white)

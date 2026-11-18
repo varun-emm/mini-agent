@@ -1,5 +1,5 @@
 // Optional page reader for the Vercel relay: fetches a web page server-side and returns its readable text,
-// so Mini Agent can read pages exactly (browsers can't fetch most sites directly). Stores nothing.
+// so myGPT can read pages exactly (browsers can't fetch most sites directly). Stores nothing.
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "https://varun-emm.github.io")
   .split(",").map((s) => s.trim()).filter(Boolean);
 const MAX_BYTES = 3 * 1024 * 1024;
@@ -37,7 +37,7 @@ export default async function handler(req, res) {
   if (!/^https?:$/.test(url.protocol) || PRIVATE.test(url.hostname)) return res.status(400).send("That address isn't allowed.");
   try {
     const page = await fetch(url, {
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; MiniAgentReader/1.0)", Accept: "text/html,text/plain,application/json;q=0.9,*/*;q=0.5" },
+      headers: { "User-Agent": "Mozilla/5.0 (compatible; myGPTReader/1.0)", Accept: "text/html,text/plain,application/json;q=0.9,*/*;q=0.5" },
       redirect: "follow", signal: AbortSignal.timeout(20000),
     });
     const type = page.headers.get("content-type") || "";

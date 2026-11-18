@@ -10,11 +10,11 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PY = process.env.PYTHON || "python3";
 const CHROMIUM = process.env.CHROMIUM || "/usr/bin/chromium";
 const PYTOOLS = path.join(HERE, "pytools.py");
-const FONT_DIR = ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu"].find((d) => fs.existsSync(d)) || "";
+export const FONT_DIR = ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu"].find((d) => fs.existsSync(d)) || "";
 
 // The low-privilege user Python runs as (created in the Dockerfile). When the server isn't root, Python
 // simply runs as the same user.
-let sandboxUser = null;
+export let sandboxUser = null;
 try {
   if (process.getuid && process.getuid() === 0) {
     const uid = Number(execFileSync("id", ["-u", "sandbox"], { stdio: ["ignore", "pipe", "ignore"] }).toString().trim());
@@ -23,7 +23,7 @@ try {
   }
 } catch (_) { /* no sandbox user: run as the server's user */ }
 
-function chownTree(dir) {
+export function chownTree(dir) {
   if (!sandboxUser) return;
   try { execFileSync("chown", ["-R", `${sandboxUser.uid}:${sandboxUser.gid}`, dir]); } catch (_) { /* best effort */ }
 }

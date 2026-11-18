@@ -1,4 +1,4 @@
-# Mini Agent server: the agent, real Python with common libraries, and Chromium for screenshots.
+# myGPT server: the agent, real Python with common libraries, and Chromium for screenshots.
 # Works on any host that runs Docker (Render, Railway, Fly.io, Google Cloud Run, a VPS).
 FROM node:22-bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive

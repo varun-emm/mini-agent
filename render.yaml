@@ -1,5 +1,6 @@
 # One-click setup on Render (free plan): New -> Blueprint -> pick this repo.
-# You'll be asked for OPENROUTER_API_KEY and APP_PASSWORD.
+# You'll be asked for APP_PASSWORD and your provider keys: fill in OPENROUTER_API_KEY, UBERLLM_API_KEY or both
+# (leave the other one empty). The app's Settings -> Provider picks which one each chat uses.
 services:
   - type: web
     name: mini-agent
@@ -11,6 +12,8 @@ services:
     autoDeployTrigger: commit
     envVars:
       - key: OPENROUTER_API_KEY
+        sync: false
+      - key: UBERLLM_API_KEY
         sync: false
       - key: APP_PASSWORD
         sync: false

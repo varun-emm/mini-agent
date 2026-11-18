@@ -7,12 +7,12 @@ def cut(start, end):
     i = src.index(start); j = src.index(end, i)
     return src[i:j]
 parts = []
-parts.append(cut("const PROVIDERS = {", "// ---------------------------------------------------------------------------\n// Settings & chat storage"))
+parts.append(cut("const OR_API = ", "// ---------------------------------------------------------------------------\n// Settings & chat storage"))
 parts.append(cut("const EXT_INFO = {", "function fileUrl("))
 parts.append(cut("class AgentError extends Error", "// ---------------------------------------------------------------------------\n// TOOLS"))
 parts.append(cut("const truncate = ", "// Python runs in a Web Worker"))
 parts.append(cut("// Ask the vision model about a screenshot.", "// Reading a web page: get its real text"))
-parts.append(cut("const OR_API = ", "// A helper agent: works on one self-contained task"))
+parts.append(cut("const mediaKey = ", "// A helper agent: works on one self-contained task"))
 parts.append(cut("// A helper agent: works on one self-contained task", "// ---------------------------------------------------------------------------\n// Plain-English status"))
 parts.append(cut("const quote = ", "// One request from the user, start to finish."))
 parts.append(cut("// What a helper's work looks like", "// ---------------------------------------------------------------------------\n// Rendering helpers"))
@@ -29,8 +29,9 @@ rep('const CONTEXT_CHARS = Number(localStorage.getItem("ma.ctxChars")) || 70000;
 # rate-limit notices belong to the job that hit them
 rep("let rateNotice = null;   // set while a turn runs, so the status line can say what's happening\n", "")
 rep("    if (rateNotice) rateNotice(wait, attempt + 1);", "    if (state.rateNotice) state.rateNotice(wait, attempt + 1);")
-# the key lives on the server
-rep('const orKey = () => state.settings.keys.openrouter || "";', 'const orKey = () => apiKey();')
+# the provider addresses can be pointed at stand-ins (tests)
+rep('const OR_API = "https://openrouter.ai/api/v1";', 'const OR_API = OR_BASE;')
+rep('const ULL_API = "https://api.uberllm.dev/v1";', 'const ULL_API = ULL_BASE;')
 # images: read from the job's workspace and shrink with Python (no canvas on a server)
 i = body.index("async function imageRef(path) {"); j = body.index("const money = ", i)
 body = body[:i] + '''async function imageRef(path) {
@@ -63,8 +64,8 @@ rep('''    return new Date().toLocaleString("en-IN", { dateStyle: "full", timeSt
 rep('''  tool("run_python", "Run Python 3 in the user's browser (no internet). Use it for calculations, data work, and to CREATE FILES: " +''',
     '''  tool("run_python", "Run Python 3 on the server (it has internet access, and requests is installed). Use it for calculations, data work, and to CREATE FILES: " +''')
 rep('''  const now = new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short" });
-  return `You are Mini Agent''', '''  const now = new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short", timeZone: state.tz });
-  return `You are Mini Agent''')
+  return `You are myGPT''', '''  const now = new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short", timeZone: state.tz });
+  return `You are myGPT''')
 rep('''Current date and time: ${now} (${Intl.DateTimeFormat().resolvedOptions().timeZone}).''', '''Current date and time: ${now} (${state.tz}).''')
 rep('''- Python has no internet access. Get any data you need with web_search first, then put it in the code.''',
     '''- Python runs on a server with internet access, so it can download a data file directly with requests. Still use web_search and fetch_webpage to find and read information.''')
@@ -74,21 +75,20 @@ rep('''- To see what a web page looks like, screenshot its URL. The free web scr
     '''- To see what a web page looks like, screenshot its URL. The server is slow, so use it only when looking matters.''')
 # helpers and debate reach the job's spawner through the job state
 rep("tools: leadTools(), quiet: true, who: L, spawn: debate.spawn });", "tools: leadTools(), quiet: true, who: L, spawn: state.spawn });")
-# tests can point the engine at a stand-in for OpenRouter
-rep('url: "https://openrouter.ai/api/v1/chat/completions",', 'url: OR_BASE + "/chat/completions",')
-rep('const OR_API = "https://openrouter.ai/api/v1";', 'const OR_API = OR_BASE;')
 # sizes come from the file system, without reading whole files
 body = re.sub(r'files\.get\(([^()]*)\)\.bytes\.length', r'files.get(\1).size', body)
 # phone-only pieces that must not be copied
 assert "localStorage" not in body, [l for l in body.splitlines() if "localStorage" in l]
 assert not re.search(r"\bdocument\.(getElementById|querySelector|createElement)", body)
 
-header = r'''// Mini Agent server engine: the same agent as the browser app (loop, tools, helpers, debate, memory,
+header = r'''// myGPT server engine: the same agent as the browser app (loop, tools, helpers, debate, memory,
 // summarising), running on a server. Most of this file is copied verbatim from app.js by
 // tools/build-engine.py; server-specific pieces (files, Python, screenshots, page reading, job state) are below.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { runPython, thumbnail, fileShot, webShot, htmlToText, isPrivateHost } from "./sandbox.mjs";
 const OR_BASE = (process.env.OPENROUTER_BASE || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+const ULL_BASE = (process.env.UBERLLM_BASE || "https://api.uberllm.dev/v1").replace(/\/+$/, "");
+const SERVER_KEYS = { openrouter: process.env.OPENROUTER_API_KEY || "", uberllm: process.env.UBERLLM_API_KEY || "" };
 
 // Every job runs with its own state (settings, conversation, files), so several chats can work at once.
 export const jobStore = new AsyncLocalStorage();
@@ -98,11 +98,14 @@ const state = new Proxy({}, {
 });
 const files = new Proxy({}, { get: (_, k) => { const f = state.files; const v = f[k]; return typeof v === "function" ? v.bind(f) : v; } });
 
-const provider = () => PROVIDERS.openrouter;
-const apiKey = () => process.env.OPENROUTER_API_KEY || "";
-const mainModel = () => state.settings.models.openrouter || provider().defaultModel;
+const providerId = () => (PROVIDERS[state.settings.provider] ? state.settings.provider : "openrouter");
+const provider = () => PROVIDERS[providerId()];
+const apiKey = () => SERVER_KEYS[providerId()] || "";
+const mainModel = () => state.settings.models[providerId()] || provider().defaultModel;
 const currentModel = () => state.speaker || mainModel();
-const visionModel = () => state.settings.visionModels.openrouter || provider().visionModel;
+const visionModel = () => state.settings.visionModels[providerId()] || provider().visionModel;
+const imageModel = () => state.settings.imageModels[providerId()] || provider().imageModels[0][0];
+const videoModel = () => state.settings.videoModels[providerId()] || provider().videoModels[0][0];
 const reviewModel = () => state.settings.reviewModel || "anthropic/claude-sonnet-5.5";
 const debateReady = () => state.settings.debate && !!apiKey();
 const enc = new TextEncoder();
@@ -149,7 +152,7 @@ async function readPage(url, signal) {
   for (const [how, u, toText] of tries) {
     try {
       const res = await fetch(u, { signal: AbortSignal.any([signal, AbortSignal.timeout(25000)].filter(Boolean)), redirect: "follow",
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; MiniAgent/4; +https://github.com/varun-emm/mini-agent)", Accept: "text/html,text/plain,*/*;q=0.5" } });
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; myGPT/5; +https://github.com/varun-emm/mini-agent)", Accept: "text/html,text/plain,*/*;q=0.5" } });
       if (!res.ok) continue;
       const text = toText(await res.text(), res.headers.get("content-type") || "").replace(/\r/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
       if (text.length < 200) continue;          // an empty shell: the page needs a real browser
@@ -176,7 +179,7 @@ export async function runJob(job, view) {
   const ctx = {
     settings: job.settings, history: job.history, memory: job.memory, tz: job.tz, files: job.files,
     speaker: null, spawn: null, ask: job.ask,
-    rateNotice: (secs, n) => view.progress(`OpenRouter asked us to slow down. Trying again in ${secs}s${n > 1 ? ` (attempt ${n + 1})` : ""}`),
+    rateNotice: (secs, n) => view.progress(`${PROVIDERS[job.settings.provider] ? PROVIDERS[job.settings.provider].name : "The provider"} asked us to slow down. Trying again in ${secs}s${n > 1 ? ` (attempt ${n + 1})` : ""}`),
   };
   return jobStore.run(ctx, () => runTurnOnServer(job, view));
 }
@@ -246,8 +249,8 @@ async function runTurnOnServer(job, view) {
   }
 }
 
-export { APP_VERSION_ENGINE, describe, fileInfo, humanSize, cleanPath };
-const APP_VERSION_ENGINE = "4.2.0";
-'''
+export { APP_VERSION_ENGINE, describe, fileInfo, humanSize, cleanPath, PROVIDERS, TOOLS, executeTool, helperView, thoughtSnippet, debate, modelName, stepDetail, truncate };
+const APP_VERSION_ENGINE = "%s";
+''' % re.search(r'const APP_VERSION = "([^"]+)"', src).group(1)
 open(os.path.join(ROOT, "server", "engine.mjs"), "w").write(header + body + footer)
 print("engine written:", len(header + body + footer), "chars")

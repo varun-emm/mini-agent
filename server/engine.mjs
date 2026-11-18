@@ -1,9 +1,11 @@
-// Mini Agent server engine: the same agent as the browser app (loop, tools, helpers, debate, memory,
+// myGPT server engine: the same agent as the browser app (loop, tools, helpers, debate, memory,
 // summarising), running on a server. Most of this file is copied verbatim from app.js by
 // tools/build-engine.py; server-specific pieces (files, Python, screenshots, page reading, job state) are below.
 import { AsyncLocalStorage } from "node:async_hooks";
 import { runPython, thumbnail, fileShot, webShot, htmlToText, isPrivateHost } from "./sandbox.mjs";
 const OR_BASE = (process.env.OPENROUTER_BASE || "https://openrouter.ai/api/v1").replace(/\/+$/, "");
+const ULL_BASE = (process.env.UBERLLM_BASE || "https://api.uberllm.dev/v1").replace(/\/+$/, "");
+const SERVER_KEYS = { openrouter: process.env.OPENROUTER_API_KEY || "", uberllm: process.env.UBERLLM_API_KEY || "" };
 
 // Every job runs with its own state (settings, conversation, files), so several chats can work at once.
 export const jobStore = new AsyncLocalStorage();
@@ -13,11 +15,14 @@ const state = new Proxy({}, {
 });
 const files = new Proxy({}, { get: (_, k) => { const f = state.files; const v = f[k]; return typeof v === "function" ? v.bind(f) : v; } });
 
-const provider = () => PROVIDERS.openrouter;
-const apiKey = () => process.env.OPENROUTER_API_KEY || "";
-const mainModel = () => state.settings.models.openrouter || provider().defaultModel;
+const providerId = () => (PROVIDERS[state.settings.provider] ? state.settings.provider : "openrouter");
+const provider = () => PROVIDERS[providerId()];
+const apiKey = () => SERVER_KEYS[providerId()] || "";
+const mainModel = () => state.settings.models[providerId()] || provider().defaultModel;
 const currentModel = () => state.speaker || mainModel();
-const visionModel = () => state.settings.visionModels.openrouter || provider().visionModel;
+const visionModel = () => state.settings.visionModels[providerId()] || provider().visionModel;
+const imageModel = () => state.settings.imageModels[providerId()] || provider().imageModels[0][0];
+const videoModel = () => state.settings.videoModels[providerId()] || provider().videoModels[0][0];
 const reviewModel = () => state.settings.reviewModel || "anthropic/claude-sonnet-5.5";
 const debateReady = () => state.settings.debate && !!apiKey();
 const enc = new TextEncoder();
@@ -64,7 +69,7 @@ async function readPage(url, signal) {
   for (const [how, u, toText] of tries) {
     try {
       const res = await fetch(u, { signal: AbortSignal.any([signal, AbortSignal.timeout(25000)].filter(Boolean)), redirect: "follow",
-        headers: { "User-Agent": "Mozilla/5.0 (compatible; MiniAgent/4; +https://github.com/varun-emm/mini-agent)", Accept: "text/html,text/plain,*/*;q=0.5" } });
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; myGPT/5; +https://github.com/varun-emm/mini-agent)", Accept: "text/html,text/plain,*/*;q=0.5" } });
       if (!res.ok) continue;
       const text = toText(await res.text(), res.headers.get("content-type") || "").replace(/\r/g, "").replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
       if (text.length < 200) continue;          // an empty shell: the page needs a real browser
@@ -79,10 +84,14 @@ async function readPage(url, signal) {
   return null;
 }
 
+const OR_API = OR_BASE;
+const ULL_API = ULL_BASE;
 const PROVIDERS = {
   openrouter: {
+    id: "openrouter",
     name: "OpenRouter",
-    url: OR_BASE + "/chat/completions",
+    api: OR_API,
+    url: OR_API + "/chat/completions",
     keyPrefix: "sk-or-",
     keyLink: "https://openrouter.ai/settings/keys",
     defaultModel: "moonshotai/kimi-k3.1-pro",
@@ -90,8 +99,28 @@ const PROVIDERS = {
     visionModel: "anthropic/claude-haiku-5.5",
     visionModels: [["anthropic/claude-haiku-5.5", "Sharp at reading documents"], ["moonshotai/kimi-k3.1-pro", "Kimi reads images too"], ["openai/gpt-6-luna", "Fast and cheap"]],
     models: [["moonshotai/kimi-k3.1-pro", "Kimi K3.1 Pro: strongest at long jobs"], ["anthropic/claude-sonnet-5.5", "Claude: careful and clear"], ["openai/gpt-oss-120b", "Cheapest, about 10x less"]],
+    imageModels: [["google/gemini-3.1-flash-image", "Quick and cheap, good at edits"], ["openai/gpt-image-2", "Best at text inside images"], ["black-forest-labs/flux-3-image", "Photorealistic"]],
+    videoModels: [["google/veo-3.1-fast", "Good quality with sound, fair price"], ["google/veo-3.1", "Best quality, costs about 4x more"], ["kwaivgi/kling-v3.0-std", "Smooth motion, low price"], ["alibaba/wan-3.0", "Budget, clips up to 30 seconds"]],
+  },
+  uberllm: {
+    id: "uberllm",
+    name: "UberLLM",
+    api: ULL_API,
+    url: ULL_API + "/chat/completions",
+    keyPrefix: "ull_",
+    keyLink: "https://uberllm.dev/dashboard",
+    defaultModel: "moonshotai/kimi-k3.1-pro",
+    searchModel: "",                             // no built-in web search: results come from DuckDuckGo instead
+    visionModel: "anthropic/claude-haiku-5.5",
+    visionModels: [["anthropic/claude-haiku-5.5", "Sharp at reading documents"], ["moonshotai/kimi-k3.1-pro", "Kimi reads images too"], ["google/gemini-3.8-flash", "Fast and cheap"]],
+    models: [["moonshotai/kimi-k3.1-pro", "Kimi K3.1 Pro: strongest at long jobs"], ["anthropic/claude-sonnet-5.5", "Claude: careful and clear"], ["openai/gpt-oss-120b", "Cheapest, about 100x less"]],
+    // UberLLM makes new pictures and edits pictures with different models: edits use editModel
+    imageModels: [["venice/nano-banana-2", "Quick and cheap"], ["openai/venice-gpt-image-2-5-flare", "Best at text inside images"], ["venice/flux-2-pro", "Photorealistic"]],
+    editModel: "google/nano-banana-2-edit",
+    videoModels: [["fal-ai/veo3.1/fast", "Good quality with sound, fair price"], ["fal-ai/veo3.1", "Best quality, costs about 2x more"], ["fal-ai/kling-video/v3/standard/text-to-video", "Smooth motion, low price"], ["fal-ai/veo3.1/lite", "Budget, about $0.03 a second"]],
   },
 };
+const PROVIDER_IDS = Object.keys(PROVIDERS);
 // Short, friendly names for models, used when two of them debate
 const MODEL_NAMES = { "moonshotai/kimi-k3.1-pro": "Kimi", "anthropic/claude-sonnet-5.5": "Claude", "anthropic/claude-haiku-5.5": "Claude Haiku", "openai/gpt-oss-120b": "GPT-OSS" };
 const modelName = (id) => MODEL_NAMES[id] || String(id || "").split("/").pop().replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -148,7 +177,7 @@ class AgentError extends Error {
   constructor(message, code) { super(message); this.code = code; }
 }
 
-function endpoint() { return PROVIDERS.openrouter.url; }
+function endpoint() { return provider().url; }
 
 async function postLLM(body, signal) {
   try {
@@ -160,7 +189,7 @@ async function postLLM(body, signal) {
     });
   } catch (e) {
     if (e.name === "AbortError") throw e;
-    throw new AgentError("Couldn't reach OpenRouter. Check your internet connection and try again.", "network");
+    throw new AgentError(`Couldn't reach ${provider().name}. Check your internet connection and try again.`, "network");
   }
 }
 
@@ -171,7 +200,7 @@ function apiError(status, err, model) {
   const code = typeof e.code === "string" ? e.code : "";
   if (code === "tool_use_failed" || /tool_use_failed/.test(e.message || "")) return new AgentError(e.message || "Malformed tool call", "tool_use_failed");
   if (status === 401) return new AgentError(`${name} rejected the API key. Check it in Settings.`, "auth");
-  if (status === 402) return new AgentError(`Your ${name} account is out of credits. Top up, or pick a cheaper model in Settings.`, "credits");
+  if (status === 402) return new AgentError(`Your ${name} account is out of credit. Top up, or pick a cheaper model in Settings.`, "credits");
   if (status === 429) {
     const when = (((e.message || "").match(/try again in\s*([\dhms.]+)/i) || [])[1] || "").replace(/\.+$/, "");
     return new AgentError(`${name}'s rate limit was hit${when ? ` (it says to try again in ${when})` : ""}. Wait, then tap Try again. ` +
@@ -303,6 +332,18 @@ function cleanPath(p) {
   return parts.join("/");
 }
 
+// A time limit for one request that still stops at once when the user presses Stop.
+function withTimeout(signal, ms) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  if (signal) signal.addEventListener("abort", () => c.abort(), { once: true });
+  return { signal: c.signal, done: () => clearTimeout(t) };
+}
+
+// Searching the web.
+//   OpenRouter: a cheap model with OpenRouter's "web" plugin searches, reads the results and answers with sources.
+//   UberLLM has no web search, so the results come from DuckDuckGo (read through Jina Reader) and the agent
+//   opens the pages that matter with fetch_webpage.
 async function askWeb(prompt, signal, domain) {
   const body = { model: provider().searchModel, messages: [{ role: "user", content: prompt }] };
   {
@@ -322,6 +363,55 @@ async function askWeb(prompt, signal, domain) {
   }
   if (urls.size) text += "\n\nSources:\n" + [...urls].slice(0, 8).map((u) => "- " + u).join("\n");
   return text || "No results.";
+}
+// DuckDuckGo's plain results page, as Jina Reader turns it into Markdown: "## [Title](https://duckduckgo.com/l/?uddg=<real link>...)",
+// then the site and a "[snippet](...)" line.
+function parseSearchResults(md) {
+  const out = [];
+  const seen = new Set();
+  for (const sec of String(md || "").split(/\n## \[/).slice(1)) {
+    const m = sec.match(/^(.*?)\]\((https?:\/\/[^)\s]+)\)/);
+    if (!m) continue;
+    let link = m[2];
+    const u = link.match(/[?&]uddg=([^&]+)/);
+    if (u) { try { link = decodeURIComponent(u[1]); } catch (_) { /* keep it */ } }
+    if (!/^https?:\/\//.test(link) || /duckduckgo\.com\/y\.js|[?&]ad_domain=/.test(link) || seen.has(link)) continue;   // ads
+    seen.add(link);
+    let snippet = "";
+    for (const line of sec.split("\n").slice(1)) {
+      const t = line.match(/^\[(?!!\[)(.{25,}?)\]\(https?:/);
+      if (t && t[1].length > snippet.length) snippet = t[1];
+    }
+    const clean = (x) => x.replace(/\*\*/g, "").replace(/\s+/g, " ").trim();
+    out.push({ title: clean(m[1]), url: link, snippet: clean(snippet).slice(0, 320) });
+  }
+  return out;
+}
+async function searchResults(query, signal) {
+  const page = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const t = withTimeout(signal, 25000);
+    try {
+      const res = await fetch(`https://r.jina.ai/${page}`, { signal: t.signal });
+      if (res.ok) {
+        const found = parseSearchResults(await res.text());
+        if (found.length) return found;
+      }
+    } catch (e) {
+      if (signal && signal.aborted) throw e;
+    } finally { t.done(); }
+  }
+  return [];
+}
+async function webSearch(query, signal) {
+  if (provider().searchModel) {
+    return askWeb(`Search the web and answer concisely and factually. Include specific numbers and dates, and list the source URLs you used.\n\nQuery: ${query}`, signal);
+  }
+  const found = await searchResults(query, signal);
+  if (!found.length) return "The search didn't return any results (the free search service may be busy). Try other words in a moment, or read a page you know with fetch_webpage.";
+  return `Search results for "${String(query).slice(0, 120)}":\n\n` +
+    found.slice(0, 8).map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ""}`).join("\n\n") +
+    "\n\nThese are only snippets. Open the pages that matter with fetch_webpage before relying on them, and cite their URLs.";
 }
 
 function calculate(expression) {
@@ -403,33 +493,44 @@ Answer precisely and concisely. Quote the exact text and numbers you can read. L
 }
 
 
-const OR_API = OR_BASE;
-const IMAGE_MODELS = [["google/gemini-3.1-flash-image", "Quick and cheap, good at edits"], ["openai/gpt-image-2", "Best at text inside images"], ["black-forest-labs/flux-3-image", "Photorealistic"]];
-const VIDEO_MODELS = [["google/veo-3.1-fast", "Good quality with sound, fair price"], ["google/veo-3.1", "Best quality, costs about 4x more"], ["kwaivgi/kling-v3.0-std", "Smooth motion, low price"], ["alibaba/wan-3.0", "Budget, clips up to 30 seconds"]];
-const orKey = () => apiKey();
-async function orFetch(path, { method = "GET", body, signal, raw = false } = {}) {
+const mediaKey = () => apiKey();
+async function apiFetch(path, { method = "GET", body, signal, raw = false, headers = {} } = {}) {
+  const name = provider().name;
   let res;
   try {
-    res = await fetch(OR_API + path, {
+    res = await fetch(/^https?:/.test(path) ? path : provider().api + path, {
       method, signal,
-      headers: { Authorization: "Bearer " + orKey(), ...(body ? { "Content-Type": "application/json" } : {}) },
+      headers: { Authorization: "Bearer " + mediaKey(), ...(body ? { "Content-Type": "application/json" } : {}), ...headers },
       body: body ? JSON.stringify(body) : undefined,
     });
   } catch (e) {
     if (e.name === "AbortError") throw e;
-    throw new Error("Couldn't reach OpenRouter. Check the internet connection.");
+    throw new Error(`Couldn't reach ${name}. Check the internet connection.`);
   }
   if (raw) return res;
   let data = null;
   try { data = await res.json(); } catch (_) { /* not JSON */ }
   if (!res.ok || (data && data.error && !data.status)) {
     const msg = (data && data.error && (data.error.message || data.error)) || `error ${res.status}`;
-    if (res.status === 401) throw new Error("OpenRouter rejected the key. Check it in Settings.");
-    if (res.status === 402) throw new Error("The OpenRouter account doesn't have enough credit (image and video models need more than $1 of credit).");
-    throw Object.assign(new Error(`OpenRouter: ${msg}`), { status: res.status });
+    if (res.status === 401) throw new Error(`${name} rejected the key. Check it in Settings.`);
+    if (res.status === 402) throw new Error(`The ${name} account doesn't have enough credit for this.`);
+    throw Object.assign(new Error(`${name}: ${msg}`), { status: res.status });
   }
   return data;
 }
+// A model's details (UberLLM lists each model's options and price publicly)
+const modelInfoCache = new Map();
+async function ullModelInfo(model, signal) {
+  if (modelInfoCache.has(model)) return modelInfoCache.get(model);
+  let info = null;
+  try {
+    const res = await fetch(`${PROVIDERS.uberllm.api}/models/${model}`, { signal });
+    if (res.ok) info = await res.json();
+  } catch (e) { if (e.name === "AbortError") throw e; }
+  modelInfoCache.set(model, info);
+  return info;
+}
+const optionList = (info, field) => { const p = info && info.parameters && info.parameters.properties && info.parameters.properties[field]; return (p && p.enum) || null; };
 const b64ToBytes = (b64) => { const bin = atob(b64); const out = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i); return out; };
 const MEDIA_EXT = { "image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/svg+xml": "svg", "video/mp4": "mp4", "video/webm": "webm", "video/quicktime": "mov" };
 function mediaName(wanted, prompt, ext) {
@@ -449,9 +550,51 @@ async function imageRef(path) {
 }
 const money = (usd) => (usd >= 0.995 ? `$${usd.toFixed(2)}` : usd >= 0.01 ? `$${usd.toFixed(3).replace(/0$/, "")}` : `under 1 cent`);
 
-async function makeImage({ prompt, aspect_ratio, edit, filename }, ctx) {
-  if (!prompt) throw new Error("prompt is required: describe the picture in detail");
-  const model = state.settings.imageModel || IMAGE_MODELS[0][0];
+async function makeImage(args, ctx) {
+  if (!args.prompt) throw new Error("prompt is required: describe the picture in detail");
+  return providerId() === "uberllm" ? makeImageUber(args, ctx) : makeImageOR(args, ctx);
+}
+// a picture, back from the provider: save it and show it
+async function savePicture(bytes, mime, model, cost, filename, prompt, ctx) {
+  const name = mediaName(filename, prompt, MEDIA_EXT[mime] || "png");
+  files.put(name, bytes);
+  if (ctx.onImage) { try { ctx.onImage(await thumbnail(files.abs(name), 1100, "jpeg")); } catch (_) { /* preview only */ } }
+  return `Saved ${name} (${humanSize(bytes.length)}, made with ${model}${typeof cost === "number" ? `, cost ${money(cost)}` : ""}). It's shown to the user automatically. ` +
+    `If details or text in it matter, check it with screenshot.`;
+}
+async function makeImageUber({ prompt, aspect_ratio, edit, filename }, ctx) {
+  const sources = [];
+  for (const p of [].concat(edit || []).slice(0, 4)) sources.push(await imageRef(p));
+  const model = sources.length ? PROVIDERS.uberllm.editModel : imageModel();
+  const info = await ullModelInfo(model, ctx.signal);
+  const body = { model, prompt, n: 1, response_format: "b64_json" };
+  const ratios = optionList(info, "aspect_ratio");
+  if (aspect_ratio || ratios) body.aspect_ratio = pickClosest(ratios, aspect_ratio || "1:1", "1:1");
+  if (sources.length) { body.image = sources[0]; if (sources.length > 1) body.input_images = sources; }
+  const data = await apiFetch(sources.length ? "/images/edits" : "/images/generations", { method: "POST", body, signal: ctx.signal });
+  const d = data && data.data && data.data[0];
+  if (!d) throw new Error("UberLLM sent back no image.");
+  let bytes, mime = "image/png";
+  if (d.b64_json) { bytes = b64ToBytes(d.b64_json); mime = d.media_type || d.content_type || sniffImage(bytes) || mime; }
+  else if (d.url) {
+    const r = await apiFetch(d.url, { signal: ctx.signal, raw: true });
+    if (!r.ok) throw new Error(`Couldn't download the picture (${r.status}).`);
+    const blob = await r.blob();
+    bytes = new Uint8Array(await blob.arrayBuffer());
+    mime = (blob.type || "").startsWith("image/") ? blob.type : sniffImage(bytes) || mime;
+  } else throw new Error("UberLLM sent back no image.");
+  const cost = data.usage && typeof data.usage.cost_usd === "number" ? data.usage.cost_usd : null;
+  return savePicture(bytes, mime, model, cost, filename, prompt, ctx);
+}
+// PNG, JPEG or WebP, from the first bytes
+function sniffImage(b) {
+  if (b[0] === 0x89 && b[1] === 0x50) return "image/png";
+  if (b[0] === 0xff && b[1] === 0xd8) return "image/jpeg";
+  if (b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return "image/webp";
+  return "";
+}
+async function makeImageOR({ prompt, aspect_ratio, edit, filename }, ctx) {
+  const model = imageModel();
   const refs = [];
   for (const p of [].concat(edit || []).slice(0, 4)) refs.push({ type: "image_url", image_url: { url: await imageRef(p) } });
   const body = { model, prompt, n: 1, output_format: "png" };
@@ -459,16 +602,16 @@ async function makeImage({ prompt, aspect_ratio, edit, filename }, ctx) {
   if (refs.length) body.input_references = refs;
   let bytes, mime = "image/png", cost = null;
   try {
-    const data = await orFetch("/images", { method: "POST", body, signal: ctx.signal });
+    const data = await apiFetch("/images", { method: "POST", body, signal: ctx.signal });
     const d = data.data && data.data[0];
-    if (!d || !d.b64_json) throw new Error("OpenRouter sent back no image.");
+    if (!d || !d.b64_json) throw new Error(`${provider().name} sent back no image.`);
     bytes = b64ToBytes(d.b64_json); mime = d.media_type || mime;
     cost = data.usage && data.usage.cost;
   } catch (e) {
     if (e.name === "AbortError" || ![400, 404, 405].includes(e.status)) throw e;
     // some image models only work through chat: ask for an image in the reply instead
     const content = refs.length ? [{ type: "text", text: prompt }, ...refs] : prompt;
-    const data = await orFetch("/chat/completions", { method: "POST", signal: ctx.signal, body: {
+    const data = await apiFetch("/chat/completions", { method: "POST", signal: ctx.signal, body: {
       model, modalities: ["image", "text"], messages: [{ role: "user", content }], ...(aspect_ratio ? { image_config: { aspect_ratio } } : {}),
     } });
     const m = data.choices && data.choices[0] && data.choices[0].message;
@@ -478,18 +621,14 @@ async function makeImage({ prompt, aspect_ratio, edit, filename }, ctx) {
     mime = hit[1]; bytes = b64ToBytes(hit[2]);
     cost = data.usage && data.usage.cost;
   }
-  const name = mediaName(filename, prompt, MEDIA_EXT[mime] || "png");
-  files.put(name, bytes);
-  if (ctx.onImage) { try { ctx.onImage(await thumbnail(files.abs(name), 1100, "jpeg")); } catch (_) { /* preview only */ } }
-  return `Saved ${name} (${humanSize(bytes.length)}, made with ${model}${typeof cost === "number" ? `, cost ${money(cost)}` : ""}). It's shown to the user automatically. ` +
-    `If details or text in it matter, check it with screenshot.`;
+  return savePicture(bytes, mime, model, cost, filename, prompt, ctx);
 }
 
 // Video: estimate the price, ask the user, start the job, wait for it, then download the clip.
 let videoModelsCache = null;
 async function videoModelInfo(model, signal) {
   if (!videoModelsCache) {
-    try { videoModelsCache = (await orFetch("/videos/models", { signal })).data || []; } catch (e) { if (e.name === "AbortError") throw e; videoModelsCache = []; }
+    try { videoModelsCache = (await apiFetch("/videos/models", { signal })).data || []; } catch (e) { if (e.name === "AbortError") throw e; videoModelsCache = []; }
   }
   return videoModelsCache.find((m) => m.id === model || m.canonical_slug === model) || null;
 }
@@ -521,9 +660,74 @@ function priceFor(info, seconds, resolution) {
   return { low: Math.min(...vals), high: Math.max(...vals) };
 }
 const confirmVideo = (text) => state.ask("video", text);
-async function makeVideo({ prompt, seconds, aspect_ratio, resolution, from_image, filename }, ctx) {
-  if (!prompt) throw new Error("prompt is required: describe the scene, the camera movement and the mood");
-  const model = state.settings.videoModel || VIDEO_MODELS[0][0];
+async function makeVideo(args, ctx) {
+  if (!args.prompt) throw new Error("prompt is required: describe the scene, the camera movement and the mood");
+  return providerId() === "uberllm" ? makeVideoUber(args, ctx) : makeVideoOR(args, ctx);
+}
+const DECLINED_VIDEO = "The user chose not to make this video (it costs money). Ask if they'd like a shorter clip, a different model, or still images instead.";
+const clock = (secs) => (secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, "0")}s`);
+// UberLLM: the clip's options and price come from the model's public details; the job is started, checked every
+// 5 seconds, then downloaded with the key.
+async function makeVideoUber({ prompt, seconds, aspect_ratio, resolution, from_image, filename }, ctx) {
+  let model = videoModel();
+  if (from_image) {   // animating a picture needs the model's image-to-video version
+    const tries = [model.replace(/text-to-video$/, "image-to-video"), model + "/image-to-video", "fal-ai/veo3.1/fast/image-to-video"];
+    for (const m of tries) { const i = m !== model && await ullModelInfo(m, ctx.signal); if (i && i.available !== false) { model = m; break; } }
+  }
+  const info = await ullModelInfo(model, ctx.signal);
+  const durs = optionList(info, "duration_seconds");
+  const dur = pickClosest(durs, seconds ? Math.round(Number(seconds)) : null, 6);
+  const resList = optionList(info, "resolution");
+  const res = resList ? pickClosest(resList, resolution || "720p", "720p") : null;
+  const ratioList = optionList(info, "aspect_ratio");
+  const ratio = ratioList ? pickClosest(ratioList, aspect_ratio || "16:9", "16:9") : null;
+  const pr = info && info.pricing;
+  const est = pr && Number(pr.usd) > 0 ? (pr.unit === "second" ? Number(pr.usd) * dur : Number(pr.usd)) : null;
+  const ok = await confirmVideo(`${dur}-second${res ? ` ${res}` : ""} video${ratio ? ` (${ratio})` : ""} with ${(info && info.display_name) || model.split("/").pop()}. ` +
+    (est ? `It will cost about ${money(est)} of UberLLM credit${/1080|4k/i.test(res || "") ? " (higher resolutions can cost more)" : ""}.` : "UberLLM didn't list a price for this model; video models usually cost $0.03 to $0.40 per second.") +
+    `\n\n“${String(prompt).slice(0, 240)}${String(prompt).length > 240 ? "…" : ""}”`);
+  if (!ok) return DECLINED_VIDEO;
+  const body = { model, prompt, duration_seconds: dur };
+  if (res) body.resolution = res;
+  if (ratio) body.aspect_ratio = ratio;
+  if (from_image) body.image_url = await imageRef(from_image);
+  const idem = "mygpt-" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+  const job = await apiFetch("/video/generations", { method: "POST", body, signal: ctx.signal, headers: { "Idempotency-Key": idem } });
+  if (!job || !job.id) throw new Error("UberLLM didn't start the video job.");
+  const started = Date.now();
+  let st = job;
+  const cancel = () => { apiFetch(`/video/generations/${job.id}`, { method: "DELETE" }).catch(() => {}); };
+  if (ctx.signal) ctx.signal.addEventListener("abort", cancel, { once: true });
+  while (!["succeeded", "failed", "canceled", "expired"].includes(st.status)) {
+    if (Date.now() - started > 15 * 60 * 1000) throw new Error(`The video is still not ready after 15 minutes (job ${job.id}).`);
+    await waitFor(5000, ctx.signal);
+    const secs = Math.round((Date.now() - started) / 1000);
+    const pct = typeof st.progress === "number" && st.progress > 0 ? `, ${Math.round(st.progress * 100)}%` : "";
+    if (ctx.onProgress) ctx.onProgress(`Making the video (${clock(secs)} so far${pct}, usually 1 to 3 minutes)`);
+    try { st = await apiFetch(`/video/generations/${job.id}`, { signal: ctx.signal }); } catch (e) { if (e.name === "AbortError") throw e; }
+  }
+  if (ctx.signal) ctx.signal.removeEventListener("abort", cancel);
+  if (st.status !== "succeeded") throw new Error(`The video ${st.status}${st.error ? `: ${typeof st.error === "string" ? st.error : st.error.message || ""}` : ""}.`);
+  if (ctx.onProgress) ctx.onProgress("Downloading the video");
+  const out = (st.results || [])[0] || {};
+  let bytes = null, mime = out.content_type || "video/mp4";
+  for (const u of [out.url, `/media/artifacts/${job.id}/0`].filter(Boolean)) {
+    try {
+      const r = await apiFetch(u, { signal: ctx.signal, raw: true });
+      if (!r.ok) continue;
+      const blob = await r.blob();
+      if (blob.size > 1000) { bytes = new Uint8Array(await blob.arrayBuffer()); if ((blob.type || "").startsWith("video/")) mime = blob.type; break; }
+    } catch (e) { if (ctx.signal && ctx.signal.aborted) throw e; }
+  }
+  const c = st.usage && typeof st.usage.cost_usd === "number" ? st.usage.cost_usd : est;
+  const cost = typeof c === "number" ? `, cost ${st.usage && typeof st.usage.cost_usd === "number" ? "" : "about "}${money(c)}` : "";
+  if (!bytes) return `The video was made${cost}, but it couldn't be downloaded here. Its UberLLM job id is ${job.id}; the user can find it under Activity on uberllm.dev for 24 hours.`;
+  const name = mediaName(filename, prompt, MEDIA_EXT[mime] || "mp4");
+  files.put(name, bytes);
+  return `Saved ${name} (${dur}s${res ? `, ${res}` : ""}, ${humanSize(bytes.length)}, made with ${model}${cost}). It's shown to the user automatically and plays in the chat.`;
+}
+async function makeVideoOR({ prompt, seconds, aspect_ratio, resolution, from_image, filename }, ctx) {
+  const model = videoModel();
   const info = await videoModelInfo(model, ctx.signal);
   const dur = pickClosest(info && info.supported_durations, seconds ? Math.round(Number(seconds)) : null, 6);
   const res = pickClosest(info && info.supported_resolutions, resolution || "720p", "720p");
@@ -533,10 +737,10 @@ async function makeVideo({ prompt, seconds, aspect_ratio, resolution, from_image
     (est ? `It will cost about ${est.high - est.low < 0.01 ? money(est.low) : `${money(est.low)} to ${money(est.high)} (more with sound)`} of OpenRouter credit.`
       : "OpenRouter didn't list a per-second price for this model; video models usually cost $0.03 to $0.40 per second.") +
     `\n\n“${String(prompt).slice(0, 240)}${String(prompt).length > 240 ? "…" : ""}”`);
-  if (!ok) return "The user chose not to make this video (it costs money). Ask if they'd like a shorter clip, a different model, or still images instead.";
+  if (!ok) return DECLINED_VIDEO;
   const body = { model, prompt, duration: dur, resolution: res, aspect_ratio: ratio };
   if (from_image) body.input_references = [{ type: "image_url", image_url: { url: await imageRef(from_image) } }];
-  const job = await orFetch("/videos", { method: "POST", body, signal: ctx.signal });
+  const job = await apiFetch("/videos", { method: "POST", body, signal: ctx.signal });
   if (!job || !job.id) throw new Error("OpenRouter didn't start the video job.");
   const started = Date.now();
   let st = job;
@@ -544,8 +748,8 @@ async function makeVideo({ prompt, seconds, aspect_ratio, resolution, from_image
     if (Date.now() - started > 15 * 60 * 1000) throw new Error(`The video is still not ready after 15 minutes (job ${job.id}).`);
     await waitFor(5000, ctx.signal);
     const secs = Math.round((Date.now() - started) / 1000);
-    if (ctx.onProgress) ctx.onProgress(`Making the video (${secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${String(secs % 60).padStart(2, "0")}s`} so far, usually 1 to 3 minutes)`);
-    try { st = await orFetch(`/videos/${job.id}`, { signal: ctx.signal }); } catch (e) { if (e.name === "AbortError") throw e; }
+    if (ctx.onProgress) ctx.onProgress(`Making the video (${clock(secs)} so far, usually 1 to 3 minutes)`);
+    try { st = await apiFetch(`/videos/${job.id}`, { signal: ctx.signal }); } catch (e) { if (e.name === "AbortError") throw e; }
   }
   if (st.status !== "completed") throw new Error(`The video ${st.status}${st.error ? `: ${typeof st.error === "string" ? st.error : st.error.message || ""}` : ""}.`);
   if (ctx.onProgress) ctx.onProgress("Downloading the video");
@@ -553,7 +757,7 @@ async function makeVideo({ prompt, seconds, aspect_ratio, resolution, from_image
   const tries = [[`/videos/${job.id}/content?index=0`, true], ...((st.urls || []).map((u) => [u, false]))];
   for (const [u, auth] of tries) {
     try {
-      const r = auth ? await orFetch(u, { signal: ctx.signal, raw: true }) : await fetch(u, { signal: ctx.signal });
+      const r = auth ? await apiFetch(u, { signal: ctx.signal, raw: true }) : await fetch(u, { signal: ctx.signal });
       if (!r.ok) continue;
       const blob = await r.blob();
       if (blob.size < 1000) continue;
@@ -574,14 +778,14 @@ async function makeVideo({ prompt, seconds, aspect_ratio, resolution, from_image
 
 // A helper agent: works on one self-contained task with its own conversation, in parallel with others.
 function helperPrompt() {
-  return systemPrompt().replace(/^You are Mini Agent[^\n]*/, "You are a helper agent inside Mini Agent. A lead agent gave you one self-contained task; other helpers may be working on other parts at the same time. Do the task completely with your tools, then reply with a clear, factual report for the lead agent (not for the user): the findings with numbers, dates and source URLs, and the names of any files you made.")
+  return systemPrompt().replace(/^You are myGPT[^\n]*/, "You are a helper agent inside myGPT. A lead agent gave you one self-contained task; other helpers may be working on other parts at the same time. Do the task completely with your tools, then reply with a clear, factual report for the lead agent (not for the user): the findings with numbers, dates and source URLs, and the names of any files you made.")
     .replace(/\nPlanning:[\s\S]*?(?=\n\n)/, "").replace(/\nHelpers and parallel work:[\s\S]*?(?=\n\n)/, "").replace(/\nMemory:[\s\S]*?(?=\n\n)/, "");
 }
 
 const TOOL_FUNCTIONS = {
   async web_search({ query }, ctx) {
     if (!query) throw new Error("query is required");
-    return askWeb(`Search the web and answer concisely and factually. Include specific numbers and dates, and list the source URLs you used.\n\nQuery: ${query}`, ctx.signal);
+    return webSearch(query, ctx.signal);
   },
   async fetch_webpage({ url, start }, ctx) {
     let host = "";
@@ -589,6 +793,7 @@ const TOOL_FUNCTIONS = {
     if (!/^https?:\/\//i.test(url || "") || !host) throw new Error("Give a full URL starting with http:// or https://");
     const page = await readPage(url, ctx.signal);
     if (!page) {
+      if (!provider().searchModel) return `Couldn't load ${url}: the site blocks automatic readers or didn't answer. Try another source from the search results.`;
       const summary = await askWeb(`Visit this exact page and report its main content in detail: key facts, numbers, names and dates. Don't add anything that isn't on the page.\n\nURL: ${url}`, ctx.signal, host);
       return summary + "\n\n(The page couldn't be loaded directly, so this is a search model's report of it, not the exact text.)";
     }
@@ -674,14 +879,8 @@ const TOOL_FUNCTIONS = {
     if (!ctx.spawn) throw new Error("Helpers can't start their own helpers. Do this part yourself.");
     return ctx.spawn(String(task).trim(), ctx.signal);
   },
-  async generate_image(args, ctx) {
-    if (!orKey()) return "Error: making pictures needs an OpenRouter key. Tell the user to add one in Settings.";
-    return makeImage(args, ctx);
-  },
-  async generate_video(args, ctx) {
-    if (!orKey()) return "Error: making videos needs an OpenRouter key. Tell the user to add one in Settings.";
-    return makeVideo(args, ctx);
-  },
+  async generate_image(args, ctx) { return makeImage(args, ctx); },
+  async generate_video(args, ctx) { return makeVideo(args, ctx); },
   async get_current_time() {
     return new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short", timeZone: state.tz }) + ` (${state.tz})`;
   },
@@ -739,8 +938,8 @@ const TOOLS = [
 // Who gets which tools
 const MEMORY_TOOLS = new Set(["remember", "forget"]);
 const MEDIA_TOOLS = new Set(["generate_image", "generate_video"]);
-const leadTools = () => TOOLS.filter((t) => (state.settings.memory || !MEMORY_TOOLS.has(t.function.name)) && (orKey() || !MEDIA_TOOLS.has(t.function.name)));
-const helperTools = () => TOOLS.filter((t) => !["delegate", "update_plan", "remember", "forget", "generate_video"].includes(t.function.name) && (orKey() || !MEDIA_TOOLS.has(t.function.name)));
+const leadTools = () => TOOLS.filter((t) => state.settings.memory || !MEMORY_TOOLS.has(t.function.name));
+const helperTools = () => TOOLS.filter((t) => !["delegate", "update_plan", "remember", "forget", "generate_video"].includes(t.function.name));
 // lookups that can safely run at the same time (they don't change files)
 const PARALLEL_SAFE = new Set(["web_search", "fetch_webpage", "calculator", "read_file", "list_files", "get_current_time", "delegate", "generate_image"]);
 
@@ -799,7 +998,23 @@ function describe(name, args, done) {
       const what = /^https?:/i.test(t) ? hostOf(t) : t || "its work";
       return done ? `Took a screenshot of ${what} and checked it` : `Taking a screenshot of ${what}`;
     }
-    default: return `${done ? "Used" : "Using"} ${name}`;
+    // opencode's own tools (when your server runs opencode as the brain)
+    case "bash": {
+      const names = filesInCode(a.command);
+      if (a.description) return `${done ? "Ran" : "Running"}: ${String(a.description).replace(/\.$/, "").slice(0, 80)}`;
+      if (names.length) return `${done ? "Created" : "Creating"} ${listNames(names)}`;
+      return `${done ? "Ran" : "Running"} ${quote(String(a.command || "a command").split("\n")[0], 50)}`;
+    }
+    case "write": return `${done ? "Wrote" : "Writing"} ${a.filePath || "a file"}`;
+    case "edit": return `${done ? "Edited" : "Editing"} ${a.filePath || "a file"}`;
+    case "read": return `${done ? "Read" : "Reading"} ${a.filePath || "a file"}`;
+    case "glob": case "list": return done ? "Looked through the files" : "Looking through the files";
+    case "grep": return `${done ? "Searched" : "Searching"} the files for ${quote(a.pattern, 40)}`;
+    case "webfetch": return `${done ? "Read" : "Reading"} ${hostOf(a.url)}`;
+    case "task": return done ? `A helper finished ${quote(a.description || a.prompt, 70)}` : `Handing ${quote(a.description || a.prompt, 60)} to a helper`;
+    case "todowrite": return done ? "Updated the plan" : "Updating the plan";
+    case "skill": return `${done ? "Loaded" : "Loading"} the ${a.name || ""} skill`.replace("  ", " ");
+    default: return `${done ? "Used" : "Using"} ${name.replace(/_/g, " ")}`;
   }
 }
 const parseArgs = (raw) => { try { return JSON.parse(raw || "{}"); } catch (_) { return {}; } };
@@ -858,7 +1073,7 @@ function describeForming(name, raw) {
 }
 
 // Which way the loader turns: tools that pull information in run it backwards; tools that make things run it forwards.
-const PULL_TOOLS = new Set(["web_search", "fetch_webpage", "read_file", "list_files", "get_current_time", "screenshot"]);
+const PULL_TOOLS = new Set(["web_search", "fetch_webpage", "read_file", "list_files", "get_current_time", "screenshot", "read", "glob", "grep", "list", "webfetch"]);
 
 function stepDetail(name, args, result) {
   if (name === "screenshot") return `Asked: ${args.question || "(no question)"}\n\n${result}`;
@@ -890,7 +1105,7 @@ ${facts ? `- What you already know about the user from earlier chats:\n${facts}`
 
 function systemPrompt() {
   const now = new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short", timeZone: state.tz });
-  return `You are Mini Agent, a capable assistant that completes tasks by working in a loop: think about the next step, use a tool, look at the result, and repeat until the task is truly done.
+  return `You are myGPT, a capable assistant that completes tasks by working in a loop: think about the next step, use a tool, look at the result, and repeat until the task is truly done.
 
 Current date and time: ${now} (${state.tz}).
 
@@ -911,9 +1126,9 @@ Helpers and parallel work:
 - Don't delegate small or sequential steps; do those yourself.
 
 Pictures and video:
-${orKey() ? `- generate_image makes pictures with an AI model (photos, illustrations, logos, posters, social posts) and can edit or restyle images in the workspace. Write detailed prompts. For charts of data use run_python instead.
+- generate_image makes pictures with an AI model (photos, illustrations, logos, posters, social posts) and can edit or restyle images in the workspace. Write detailed prompts. For charts of data use run_python instead.
 - generate_video makes short clips, but each one costs real money and the user must confirm the price. Use it only when they ask for a video.
-- After making an image whose details or text matter, check it with screenshot, and make it again if it's wrong.` : `- Making AI pictures and videos needs an OpenRouter key. If the user asks for one, tell them to add an OpenRouter key in Settings. You can still draw charts and diagrams with run_python.`}
+- After making an image whose details or text matter, check it with screenshot, and make it again if it's wrong.
 
 Files the user attaches:
 - They're in your workspace under their own names (list_files shows them). Open them with run_python: pypdf for PDFs, python-docx for Word, openpyxl or pandas for Excel and CSV, python-pptx for PowerPoint.
@@ -1132,7 +1347,7 @@ const REVIEW_TOOLS = TOOLS.filter((t) => REVIEW_TOOL_NAMES.has(t.function.name))
 
 function reviewerPrompt(lead, leadModel) {
   const now = new Date().toLocaleString("en-IN", { dateStyle: "full", timeStyle: "short" });
-  return `You are the reviewer in Mini Agent, a chat app where two AIs work on each request together. Another AI (${lead}, model ${leadModel}) did the work and wrote a draft answer for the user. You and it debate until you agree, then the user gets the answer.
+  return `You are the reviewer in myGPT, a chat app where two AIs work on each request together. Another AI (${lead}, model ${leadModel}) did the work and wrote a draft answer for the user. You and it debate until you agree, then the user gets the answer.
 
 Current date and time: ${now}.
 
@@ -1285,7 +1500,7 @@ export async function runJob(job, view) {
   const ctx = {
     settings: job.settings, history: job.history, memory: job.memory, tz: job.tz, files: job.files,
     speaker: null, spawn: null, ask: job.ask,
-    rateNotice: (secs, n) => view.progress(`OpenRouter asked us to slow down. Trying again in ${secs}s${n > 1 ? ` (attempt ${n + 1})` : ""}`),
+    rateNotice: (secs, n) => view.progress(`${PROVIDERS[job.settings.provider] ? PROVIDERS[job.settings.provider].name : "The provider"} asked us to slow down. Trying again in ${secs}s${n > 1 ? ` (attempt ${n + 1})` : ""}`),
   };
   return jobStore.run(ctx, () => runTurnOnServer(job, view));
 }
@@ -1355,5 +1570,5 @@ async function runTurnOnServer(job, view) {
   }
 }
 
-export { APP_VERSION_ENGINE, describe, fileInfo, humanSize, cleanPath };
-const APP_VERSION_ENGINE = "4.2.0";
+export { APP_VERSION_ENGINE, describe, fileInfo, humanSize, cleanPath, PROVIDERS, TOOLS, executeTool, helperView, thoughtSnippet, debate, modelName, stepDetail, truncate };
+const APP_VERSION_ENGINE = "5.0.0";

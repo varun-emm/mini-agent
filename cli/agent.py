@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mini Agent - a small agentic chatbot running on OpenRouter (Kimi, Claude, GPT and more).
+myGPT - a small agentic chatbot running on OpenRouter (Kimi, Claude, GPT and more).
 
 This file IS the "harness": the software wrapped around the model.
 The model only writes text. This program:
@@ -97,7 +97,7 @@ def web_search(query, max_results=5):
 
 def fetch_webpage(url):
     import requests
-    resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0 (MiniAgent)"})
+    resp = requests.get(url, timeout=20, headers={"User-Agent": "Mozilla/5.0 (myGPT)"})
     resp.raise_for_status()
     html = resp.text
     html = re.sub(r"(?is)<(script|style|noscript|svg).*?</\1>", " ", html)
@@ -232,7 +232,7 @@ def execute_tool(name, raw_args):
 # SYSTEM PROMPT - the standing instructions that shape the agent's behaviour
 # ---------------------------------------------------------------------------
 def system_prompt():
-    return f"""You are Mini Agent, a capable assistant that completes tasks by working in a loop:
+    return f"""You are myGPT, a capable assistant that completes tasks by working in a loop:
 think about the next step, use a tool, look at the result, and repeat until the task is truly done.
 
 Current date and time: {get_current_time()}
@@ -335,7 +335,7 @@ def main():
     client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=key)
     messages = [{"role": "system", "content": system_prompt()}]
 
-    print(f"{C.BOLD}Mini Agent{C.END} on {MODEL}. Files go in: {WORKSPACE}")
+    print(f"{C.BOLD}myGPT{C.END} on {MODEL}. Files go in: {WORKSPACE}")
     print("Commands: /tools  /reset  /quit\n")
     while True:
         try:

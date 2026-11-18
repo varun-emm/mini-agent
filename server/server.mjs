@@ -1,10 +1,13 @@
-// Mini Agent server: runs the agent for the phone app. The phone keeps the chats; for each message it
+// myGPT server: runs the agent for the phone app. The phone keeps the chats; for each message it
 // sends the conversation and the files the job needs, then watches live progress and saves the result.
 // Built for a small free host (512 MB, sleeps when idle), so it stores nothing that matters for long.
+// With about 1 GB of memory or more, opencode runs as the brain (see brain.mjs); otherwise myGPT's own harness.
 //
 // Environment:
-//   OPENROUTER_API_KEY  your OpenRouter key (required)
+//   OPENROUTER_API_KEY  your OpenRouter key   } at least one of the two
+//   UBERLLM_API_KEY     your UberLLM key      }
 //   APP_PASSWORD        the password the app signs in with (required)
+//   BRAIN               builtin (default), opencode (experimental, needs ~1 GB), or auto (opencode when there's ~1 GB)
 //   ALLOWED_ORIGINS     sites allowed to call the server (default https://varun-emm.github.io)
 //   PORT                port to listen on (default 10000)
 //   PUBLIC_URL          this server's public address, for keep-awake pings (Render sets RENDER_EXTERNAL_URL)
@@ -13,11 +16,12 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
-import { runJob, cleanPath, APP_VERSION_ENGINE } from "./engine.mjs";
+import { runJob, cleanPath, APP_VERSION_ENGINE, PROVIDERS } from "./engine.mjs";
+import { makeBrain } from "./brain.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..");                         // the app's own files (index.html, app.js, ...)
-const DATA = process.env.DATA_DIR || "/tmp/mini-agent";
+const DATA = process.env.DATA_DIR || "/tmp/mygpt";
 const BLOBS = path.join(DATA, "blobs");
 const JOBS_DIR = path.join(DATA, "jobs");
 fs.mkdirSync(DATA, { recursive: true, mode: 0o755 });
@@ -26,18 +30,21 @@ fs.mkdirSync(JOBS_DIR, { recursive: true, mode: 0o711 });   // Python can reach 
 fs.chmodSync(DATA, 0o755); fs.chmodSync(BLOBS, 0o700); fs.chmodSync(JOBS_DIR, 0o711);
 const VERSION = APP_VERSION_ENGINE;
 const PORT = Number(process.env.PORT) || 10000;
-const KEY = process.env.OPENROUTER_API_KEY || "";
+const KEYS = { openrouter: process.env.OPENROUTER_API_KEY || "", uberllm: process.env.UBERLLM_API_KEY || "" };
+const KEY = KEYS.openrouter || KEYS.uberllm;
+const HAVE = Object.keys(KEYS).filter((k) => KEYS[k]);
 const PASSWORD = process.env.APP_PASSWORD || "";
 const ORIGINS = (process.env.ALLOWED_ORIGINS || "https://varun-emm.github.io").split(",").map((s) => s.trim()).filter(Boolean);
 const PUBLIC_URL = (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/+$/, "");
 const MAX_JOBS = Number(process.env.MAX_JOBS) || 2;          // jobs running at once (the free plan has 512 MB)
+const brain = makeBrain({ port: PORT, dataDir: DATA, log: (t) => console.log(t) });
 const KEEP_RESULTS_MS = 3 * 3600 * 1000;                     // finished results wait this long for the phone
 const BLOB_CACHE_BYTES = 400 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Sign-in: a password gives a signed token that survives the server sleeping and waking
 // ---------------------------------------------------------------------------
-const SECRET = crypto.createHash("sha256").update(`mini-agent|${process.env.SESSION_SECRET || ""}|${PASSWORD}|${KEY}`).digest();
+const SECRET = crypto.createHash("sha256").update(`mini-agent|${process.env.SESSION_SECRET || ""}|${PASSWORD}|${KEYS.openrouter || KEYS.uberllm}`).digest();
 const b64u = (buf) => Buffer.from(buf).toString("base64url");
 function makeToken(days = 90) {
   const body = b64u(JSON.stringify({ exp: Date.now() + days * 86400000 }));
@@ -112,17 +119,24 @@ const jobs = new Map();
 let running = 0;
 const queue = [];
 
+const per = (f) => Object.fromEntries(Object.keys(PROVIDERS).map((id) => [id, typeof f === "function" ? f(PROVIDERS[id]) : PROVIDERS[id][f]]));
 const DEFAULT_SETTINGS = {
-  models: { openrouter: "moonshotai/kimi-k3.1-pro" }, visionModels: { openrouter: "anthropic/claude-haiku-5.5" },
+  provider: HAVE[0] || "openrouter",
+  models: per("defaultModel"), visionModels: per("visionModel"),
+  imageModels: per((P) => P.imageModels[0][0]), videoModels: per((P) => P.videoModels[0][0]),
   reviewModel: "anthropic/claude-sonnet-5.5", debate: false, memory: true, askBeforeCode: false,
-  imageModel: "google/gemini-3.1-flash-image", videoModel: "google/veo-3.1-fast",
 };
 const isModelId = (s) => typeof s === "string" && /^[\w.\-/:]{3,120}$/.test(s);
 function cleanSettings(s = {}) {
   const out = JSON.parse(JSON.stringify(DEFAULT_SETTINGS));
-  if (isModelId(s.models?.openrouter)) out.models.openrouter = s.models.openrouter;
-  if (isModelId(s.visionModels?.openrouter)) out.visionModels.openrouter = s.visionModels.openrouter;
-  for (const k of ["reviewModel", "imageModel", "videoModel"]) if (isModelId(s[k])) out[k] = s[k];
+  // the provider the phone picked, if this server has its key; otherwise the one it has
+  if (PROVIDERS[s.provider] && KEYS[s.provider]) out.provider = s.provider;
+  for (const field of ["models", "visionModels", "imageModels", "videoModels"]) {
+    for (const id of Object.keys(PROVIDERS)) if (isModelId(s[field] && s[field][id])) out[field][id] = s[field][id];
+  }
+  if (isModelId(s.imageModel)) out.imageModels.openrouter = s.imageModel;   // phones on v4
+  if (isModelId(s.videoModel)) out.videoModels.openrouter = s.videoModel;
+  if (isModelId(s.reviewModel)) out.reviewModel = s.reviewModel;
   for (const k of ["debate", "memory", "askBeforeCode"]) if (typeof s[k] === "boolean") out[k] = s[k];
   return out;
 }
@@ -189,9 +203,9 @@ function startJob(job) {
   running++;
   job.status = "running";
   job.startedAt = Date.now();
-  const base = { text: job.text, attached: job.attached, signal: job.controller.signal, settings: job.settings, history: job.history,
+  const base = { id: job.id, text: job.text, attached: job.attached, signal: job.controller.signal, settings: job.settings, history: job.history,
     memory: job.memory, tz: job.tz, files: job.ws, ask: job.ask };
-  runJob(base, job.view).then((r) => finishJob(job, r), (e) => finishJob(job, {
+  (brain.enabled ? brain.runJob(base, job.view) : runJob(base, job.view)).then((r) => finishJob(job, r), (e) => finishJob(job, {
     turn: { kind: "agent", text: "", steps: [], files: [], ms: Date.now() - job.startedAt },
     history: job.history, memory: job.memory, crash: e && e.message,
   })).finally(() => {
@@ -202,6 +216,7 @@ function startJob(job) {
 }
 function finishJob(job, r) {
   if (r.crash) r.turn = { ...r.turn, kind: "error", text: `The server hit a problem: ${r.crash}`, retry: job.text };
+  if (r.turn.files) r.turn.files = r.turn.files.filter((p) => !/(^|\/)\./.test(p));   // hidden working files stay on the server
   const now = job.ws.snapshot();
   const changed = (r.turn.files || []).filter((p) => now.has(p)).map((p) => { const f = job.ws.get(p); return { path: p, size: f.size, mtime: f.mtime }; });
   const removed = job.initialPaths.filter((p) => !now.has(p));
@@ -324,6 +339,9 @@ function serveStatic(req, res, urlPath) {
   fs.createReadStream(full).pipe(res);
 }
 
+// what the app shows in Settings: version, brain, and which providers this server has keys for
+const about = () => ({ version: VERSION, providers: HAVE, ...brain.info() });
+
 function streamEvents(req, res, job, after) {
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "X-Accel-Buffering": "no", Connection: "keep-alive" });
   const write = (e) => res.write(`data: ${JSON.stringify(e)}\n\n`);
@@ -342,25 +360,26 @@ const server = http.createServer(async (req, res) => {
   cors(req, res);
   if (req.method === "OPTIONS") return send(res, 204, "");
   try {
+    if ((p.startsWith("/llm/") || p.startsWith("/mcp/")) && await brain.route(req, res, p)) return;   // opencode calling back (localhost only)
     if (!p.startsWith("/api/")) return req.method === "GET" ? serveStatic(req, res, p) : send(res, 405, "Method not allowed");
     if (p === "/api/health") {
-      const missing = [!KEY && "OPENROUTER_API_KEY", !PASSWORD && "APP_PASSWORD"].filter(Boolean);
+      const missing = [!KEY && "OPENROUTER_API_KEY or UBERLLM_API_KEY", !PASSWORD && "APP_PASSWORD"].filter(Boolean);
       return send(res, 200, { ok: !missing.length, version: VERSION, missing, jobs: jobs.size });
     }
     if (p === "/api/login" && req.method === "POST") {
-      if (!PASSWORD || !KEY) return send(res, 503, { error: "The server isn't set up yet: add OPENROUTER_API_KEY and APP_PASSWORD in your host's settings." });
+      if (!PASSWORD || !KEY) return send(res, 503, { error: "The server isn't set up yet: add APP_PASSWORD and OPENROUTER_API_KEY or UBERLLM_API_KEY in your host's settings." });
       const ip = clientIp(req);
       if (tooManyTries(ip)) return send(res, 429, { error: "Too many wrong passwords. Wait 15 minutes and try again." });
       const { password } = await readJSON(req, 10000);
       const a = crypto.createHash("sha256").update(String(password || "")).digest();
       const b = crypto.createHash("sha256").update(PASSWORD).digest();
       if (!crypto.timingSafeEqual(a, b)) { failures.get(ip).push(Date.now()); return send(res, 401, { error: "That password isn't right." }); }
-      return send(res, 200, { token: makeToken(), version: VERSION });
+      return send(res, 200, { token: makeToken(), ...about() });
     }
     const auth = String(req.headers.authorization || "");
     if (!tokenOk(auth.replace(/^Bearer\s+/i, ""))) return send(res, 401, { error: "Sign in again." });
 
-    if (p === "/api/me") return send(res, 200, { ok: true, version: VERSION });
+    if (p === "/api/me") return send(res, 200, { ok: true, ...about() });
     if (p === "/api/blobs/check" && req.method === "POST") {
       const { hashes } = await readJSON(req, 200000);
       const missing = (Array.isArray(hashes) ? hashes : []).filter((h) => /^[a-f0-9]{64}$/.test(h) && !fs.existsSync(blobPath(h)));
@@ -409,4 +428,9 @@ const server = http.createServer(async (req, res) => {
 });
 server.requestTimeout = 0;           // live event streams stay open for as long as a job runs
 server.headersTimeout = 65000;
-server.listen(PORT, () => console.log(`Mini Agent server ${VERSION} listening on :${PORT}${KEY && PASSWORD ? "" : " (set OPENROUTER_API_KEY and APP_PASSWORD)"}`));
+server.listen(PORT, () => {
+  console.log(`myGPT server ${VERSION} listening on :${PORT}${KEY && PASSWORD ? "" : " (set APP_PASSWORD and OPENROUTER_API_KEY or UBERLLM_API_KEY)"}`);
+  console.log(brain.enabled ? "Brain: opencode" : `Brain: myGPT's own harness (${brain.why})`);
+  brain.start().catch((e) => console.log(`opencode didn't start: ${e.message}`));
+});
+for (const sig of ["SIGTERM", "SIGINT"]) process.on(sig, () => { brain.stop(); process.exit(0); });
