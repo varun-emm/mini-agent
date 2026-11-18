@@ -4,7 +4,7 @@ A personal AI agent that runs in your browser on [OpenRouter](https://openrouter
 
 **Open it:** https://varun-emm.github.io/mini-agent/ (after the one-time setup below)
 
-The version number and its name (5.1 is "Astra") are shown next to the title. See [CHANGELOG.md](CHANGELOG.md) for what changed in each one.
+The version number and its name (5.1 is "Novus") are shown next to the title. See [CHANGELOG.md](CHANGELOG.md) for what changed in each one.
 
 ## What it can do
 

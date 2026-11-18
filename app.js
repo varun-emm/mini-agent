@@ -4,9 +4,9 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "5.1.0";
-// Each release also gets a name, shown next to the number. Names so far: 5.1 Astra (next ones: Sol, Opus, Fable).
-const VERSION_NAME = "Astra";
+const APP_VERSION = "5.1.1";
+// Each release also gets a name, shown next to the number (and on the new-chat screen). 5.1: Novus.
+const VERSION_NAME = "Novus";
 
 // ---------------------------------------------------------------------------
 // The providers: OpenRouter and UberLLM. Both reach many models (Kimi, Claude, GPT and more) with one key
@@ -2991,12 +2991,20 @@ function liveTurn(turn) {
   };
 }
 
-const EXAMPLES = [
-  ["Make an Excel GST calculator", "Make an Excel sheet that calculates 18% GST for 10 sample invoices, with totals and proper formatting"],
-  ["Chart India's GDP growth", "Look up India's GDP growth for the last 5 years and make a bar chart"],
-  ["Write a quotation as PDF", "Write a one-page quotation PDF for 20 hospital beds at ₹45,000 each plus 18% GST"],
-  ["Today's repo rate", "What's India's current repo rate, and what changed at the last RBI meeting?"],
+// The new-chat screen: one line, picked at random each time, with the release's name in it.
+const GREETINGS = [
+  "{n} is ready to build.",
+  "What test are we putting {n} through today?",
+  "{n}. Mark. Set. Go.",
+  "Give {n} something hard.",
+  "{n} is warmed up. Your move.",
+  "What are we making today?",
+  "{n} is listening.",
+  "Point {n} at a problem.",
+  "Ready when you are. So is {n}.",
+  "Big job or quick one? {n} does both.",
 ];
+const greeting = () => GREETINGS[Math.floor(Math.random() * GREETINGS.length)].replace(/\{n\}/g, VERSION_NAME);
 
 function renderEmpty() {
   const wrap = el("section", { class: "empty" });
@@ -3031,9 +3039,7 @@ function renderEmpty() {
       el("p", { class: "lede" }, "This chat isn't saved to your history or this device, and memory is off: nothing it learns is kept. It's gone when you leave it."));
   } else {
     wrap.append(
-      el("h2", {}, "What can I help with?"),
-      el("div", { class: "suggestions" }, ...EXAMPLES.map(([title, prompt]) =>
-        el("button", { class: "suggestion", type: "button", onclick: () => submit(prompt) }, title))));
+      el("h2", { class: "greeting" }, greeting()));
   }
   ui.thread.append(wrap);
 }
@@ -3992,6 +3998,28 @@ applyLook();
   ui.input.addEventListener("focus", () => { setTimeout(fit, 50); setTimeout(fit, 350); });
   ui.input.addEventListener("blur", () => setTimeout(fit, 100));
   fit();
+
+  // Tapping the message box on a phone: lift it (invisibly) into the top half before it takes focus, so
+  // iOS doesn't slide the whole page up to keep it above the keyboard. Once the keyboard is up, the app has
+  // already shrunk to the space above it, and the box fades back in at the bottom of that space.
+  if (!matchMedia("(pointer: coarse)").matches) return;
+  let landing = 0;
+  const land = () => {
+    clearTimeout(landing); landing = 0;
+    fit();
+    ui.form.classList.remove("lift");
+    ui.form.classList.add("landing");
+    setTimeout(() => ui.form.classList.remove("landing"), 260);
+  };
+  ui.input.addEventListener("touchend", (e) => {
+    if (document.activeElement === ui.input || ui.form.classList.contains("lift")) return;
+    e.preventDefault();                       // we focus it ourselves, from the lifted spot
+    ui.form.classList.add("lift");
+    ui.input.focus({ preventScroll: true });
+    const kb = () => { vv.removeEventListener("resize", kb); clearTimeout(landing); landing = setTimeout(land, 120); };
+    vv.addEventListener("resize", kb);
+    landing = setTimeout(() => { vv.removeEventListener("resize", kb); land(); }, 700);   // no keyboard (an external one): put it back anyway
+  }, { passive: false });
 })();
 
 // ---------------------------------------------------------------------------

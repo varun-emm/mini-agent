@@ -866,3 +866,16 @@ html, body { overflow: hidden; overscroll-behavior: none; }
 .swatch[aria-checked="true"] { box-shadow: 0 0 0 2px var(--base), 0 0 0 4px var(--blue); }
 .swatch span { font-size: 18px; color: #fff; }
 .font-sample { font-size: 17px; }
+
+/* v5.1.1: the keyboard must not move the header at all.
+   The page itself never scrolls (iOS can't push it up), and when you tap the message box it's lifted,
+   invisibly, into the top half of the screen for the moment the keyboard opens, so iOS has no reason to
+   slide the page; then it's put back just above the keyboard. */
+html, body { position: fixed; inset: 0; width: 100%; }
+.greeting { max-width: 18ch; text-wrap: balance; }
+.composer.lift {
+  transform: translate(-50%, calc(-1 * var(--vv-h, 100dvh) + 240px));
+  opacity: 0; transition: none !important;
+}
+.composer.landing { animation: composer-in 220ms ease-out; }
+@keyframes composer-in { from { opacity: 0; transform: translate(-50%, 10px); } }
