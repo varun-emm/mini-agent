@@ -4,7 +4,7 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "5.1.1";
+const APP_VERSION = "5.1.2";
 // Each release also gets a name, shown next to the number (and on the new-chat screen). 5.1: Novus.
 const VERSION_NAME = "Novus";
 
@@ -52,8 +52,18 @@ const PROVIDER_IDS = Object.keys(PROVIDERS);
 // Short, friendly names for models, used when two of them debate
 const MODEL_NAMES = { "moonshotai/kimi-k3.1-pro": "Kimi", "anthropic/claude-sonnet-5.5": "Claude", "anthropic/claude-haiku-5.5": "Claude Haiku", "openai/gpt-oss-120b": "GPT-OSS" };
 const modelName = (id) => MODEL_NAMES[id] || String(id || "").split("/").pop().replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-const MAX_STEPS = 60;              // steps per request before it stops and asks to continue
-const HELPER_STEPS = 25;           // steps a helper agent may take
+// How long the agent may work on one request, picked in the brain menu next to Send. Near the end it's told
+// how many steps are left so it wraps up, and its very last step has no tools, so it always gives an answer.
+const EFFORTS = [
+  ["thin", "Thin", 10, "Quick answers and one-file jobs"],
+  ["light", "Light", 20, "Small research or a simple file"],
+  ["medium", "Medium", 40, "Most jobs"],
+  ["thick", "Thick", 70, "Big research or several files"],
+  ["heavy", "Heavy", 120, "The longest jobs (costs the most)"],
+];
+const effort = () => EFFORTS.find(([id]) => id === state.settings.effort) || EFFORTS[2];
+const maxSteps = () => effort()[2];
+const helperSteps = () => Math.max(8, Math.min(30, Math.round(maxSteps() * 0.6)));   // each helper agent
 const MAX_TOOL_OUTPUT = 6000;
 // When the conversation the model sees grows past this many characters, old tool output is shortened
 // and older turns are summarised by the model (instead of being forgotten).
@@ -89,6 +99,7 @@ function loadSettings() {
     debate: false,       // a second model reviews each answer and they debate until they agree
     reviewModel: "anthropic/claude-sonnet-5.5",   // the reviewer in a debate
     memory: true,        // remember facts about the user across chats
+    effort: "medium",    // step budget per request (brain menu): thin, light, medium, thick, heavy
     server: { url: "", token: "" },                // your own myGPT server (optional): runs the agent there
   };
   // per-provider values (older versions only had OpenRouter; Groq was removed in v4)
@@ -107,6 +118,7 @@ function loadSettings() {
   if (typeof saved.relayUrl === "string") s.relayUrl = saved.relayUrl;
   if (typeof saved.debate === "boolean") s.debate = saved.debate;
   if (typeof saved.memory === "boolean") s.memory = saved.memory;
+  if (EFFORTS.some(([id]) => id === saved.effort)) s.effort = saved.effort;
   if (saved.server && typeof saved.server.url === "string") s.server = { url: saved.server.url, token: String(saved.server.token || "") };
   return s;
 }
@@ -1603,7 +1615,7 @@ How to work:
 - For any number that matters, use calculator or run_python. Never do important maths in your head.
 - If a tool returns an error, read it, fix your approach, and try again. Don't repeat the exact same failing call.
 - Ask the user a question only when you truly cannot proceed without their input.
-- You can take up to ${MAX_STEPS} steps per request, so finish big jobs properly. In long jobs, older tool output may be shortened and older messages summarised to save space; re-read a file or page if you need its details again.
+- You can take up to ${maxSteps()} steps (tool rounds) on this request, so plan the work to fit: you'll be told when the end is near, and your last step has no tools. In long jobs, older tool output may be shortened and older messages summarised to save space; re-read a file or page if you need its details again.
 
 Planning:
 - For any job with 3 or more steps, call update_plan first with a short plan (3 to 8 steps, plain words). Mark each step active when you start it and done when it's finished, and change the plan if you learn something new. The user watches this checklist.
@@ -1728,10 +1740,24 @@ async function compactContext(msgs, view, signal) {
 // compact (keep the conversation within CONTEXT_CHARS), spawn (starts a helper agent), maxSteps.
 // Returns its final text, or null if it ran out of steps.
 async function agentLoop(msgs, view, signal, opts) {
-  const { system, tools = TOOLS, quiet = false, who = "", compact = false, spawn = null, maxSteps = MAX_STEPS } = opts;
+  const { system, tools = TOOLS, quiet = false, who = "", compact = false, spawn = null } = opts;
+  const limit = opts.maxSteps || maxSteps();
   const tag = (label) => (who ? `${who}: ${label}` : label);
   let badCalls = 0;
-  for (let step = 1; step <= maxSteps; step++) {
+  // Reminders as the step budget runs out (once each), so the model wraps up instead of being cut off
+  const warnAt = new Map([[Math.max(2, Math.floor(limit * 0.75)), "soon"], [Math.max(2, limit - 2), "now"], [limit, "last"]]);
+  for (let step = 1; step <= limit; step++) {
+    const warn = step > 1 ? warnAt.get(step) : null;
+    if (warn) {
+      const left = limit - step + 1;
+      msgs.push({ role: "user", content: warn === "last"
+        ? `[harness note] This is your last step: tools are switched off now. Write your final answer with what you have. Say plainly what's finished and what isn't, and that the user can say "continue" or pick a heavier step budget in the brain menu.`
+        : warn === "now"
+          ? `[harness note] Only ${left} steps left of ${limit}. Stop starting new work: finish or save what's in progress (files included), then give your final answer.`
+          : `[harness note] You've used ${step - 1} of ${limit} steps. Start wrapping up: do only what's needed to finish well, and keep the remaining steps for checking and the final answer.` });
+      if (warn !== "last") view.addStep({ icon: "note", label: tag(`${left} steps left: wrapping up`), detail: `Step budget: ${limit} (${effort()[1]}).` });
+    }
+    const lastStep = step === limit;
     if (compact) await compactContext(msgs, view, signal); else repairToolPairs(msgs);
     // THINK (streamed, so the status can show what's actually going on)
     const thinkStart = Date.now();
@@ -1741,7 +1767,7 @@ async function agentLoop(msgs, view, signal, opts) {
       msg = await streamLLM({
         model: currentModel(),
         messages: [{ role: "system", content: typeof system === "function" ? system() : system }, ...msgs],
-        tools, tool_choice: "auto", temperature: 0.3,
+        tools, tool_choice: lastStep ? "none" : "auto", temperature: 0.3,
       }, signal, {
         reasoning: (chunk, all) => view.thinking(all, chunk.length),
         content: (chunk, all) => (quiet ? view.drafting(chunk.length) : view.answer(all, chunk.length)),
@@ -1762,8 +1788,8 @@ async function agentLoop(msgs, view, signal, opts) {
       view.addStep({ icon: "think", label: tag(`Thought for ${fmtDuration(Date.now() - thinkStart)}`), detail: msg.reasoning });
     }
 
-    // ACT + OBSERVE
-    if (msg.tool_calls && msg.tool_calls.length) {
+    // ACT + OBSERVE (not on the last step: then whatever it wrote is the answer)
+    if (msg.tool_calls && msg.tool_calls.length && !lastStep) {
       if (msg.content) {   // a note to itself before using a tool, not the final answer
         if (!quiet) view.dropAnswer();
         view.addStep({ icon: "note", label: tag(thoughtSnippet(msg.content, 70) || "Planned the next step"), detail: msg.content });
@@ -1809,6 +1835,7 @@ async function agentLoop(msgs, view, signal, opts) {
     }
 
     // CHECK -> DONE
+    if (lastStep && !msg.content) break;             // it still only wanted tools: report that it ran out of steps
     msgs.push({ role: "assistant", content: msg.content || "" });
     return msg.content || "";
   }
@@ -1989,7 +2016,7 @@ async function runTurn(text, attached = []) {
     const hv = helperView(view, label);
     hv.progress(`Starting: ${thoughtSnippet(task, 60)}`);
     const msgs = [{ role: "user", content: task }];
-    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: helperTools(), quiet: true, who: label, compact: true, maxSteps: HELPER_STEPS });
+    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: helperTools(), quiet: true, who: label, compact: true, maxSteps: helperSteps() });
     if (report === null) return `${label} ran out of steps before finishing. What it had so far:\n${workSummary(msgs, 4000)}`;
     return report || `${label} finished without writing a report.`;
   });
@@ -2006,8 +2033,8 @@ async function runTurn(text, attached = []) {
     if (debating) view.speaker(modelName(mainModel()) === modelName(reviewModel()) ? `${modelName(mainModel())} (writer)` : modelName(mainModel()), "lead");
     let answer = await agentLoop(state.history, view, signal, { system: systemPrompt, tools: leadTools(), quiet: debating, compact: true, spawn });
     if (answer === null) {
-      state.history.push({ role: "assistant", content: `I stopped after ${MAX_STEPS} steps without finishing.` });
-      await finish({ text: `I stopped after ${MAX_STEPS} steps without finishing. Say "continue" to let me keep going.` });
+      state.history.push({ role: "assistant", content: `I stopped after ${maxSteps()} steps without finishing.` });
+      await finish({ text: `I stopped after ${maxSteps()} steps without finishing. Say "continue" to let me keep going, or pick a heavier step budget in the brain menu.` });
       return;
     }
     let debated = null;
@@ -2221,8 +2248,8 @@ async function runRemoteTurn(text, attached = []) {
   try {
     view.waiting(mainModel());
     const fileList = await uploadChatFiles(chat.id, view);
-    const settings = (({ provider: pv, models, visionModels, imageModels, videoModels, reviewModel, debate, memory: mem, askBeforeCode }) =>
-      ({ provider: pv, models, visionModels, imageModels, videoModels, reviewModel, debate, memory: mem && !chat.incognito, askBeforeCode }))(state.settings);
+    const settings = (({ provider: pv, models, visionModels, imageModels, videoModels, reviewModel, debate, memory: mem, askBeforeCode, effort: ef }) =>
+      ({ provider: pv, models, visionModels, imageModels, videoModels, reviewModel, debate, memory: mem && !chat.incognito, askBeforeCode, effort: ef }))(state.settings);
     const { id } = await remote.json("/api/jobs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
       chatId: chat.id, text, attached, history: state.history, memory: state.settings.memory && !chat.incognito ? memory.items : [],
       settings, tz: Intl.DateTimeFormat().resolvedOptions().timeZone, files: fileList,
@@ -3933,11 +3960,27 @@ function renderModelMenu() {
     updateSubtitle();
     flashNote(`Now using ${modelName(id)}`);
   };
+  const ef = effort()[0];
+  const pickEffort = (id) => {
+    state.settings.effort = id;
+    save.settings();
+    renderModelMenu();
+    const e = effort();
+    flashNote(`${e[1]}: up to ${e[2]} steps`);
+  };
   modelMenu.replaceChildren(
     el("div", { class: "mm-head" }, `Model · ${serverOn() ? "your server" : P.name}`),
     ...list.map(([id, label]) => el("button", { type: "button", role: "menuitemradio", "aria-checked": String(id === cur), onclick: () => pick(id) },
       el("span", { class: "mm-text" }, el("span", { class: "mm-name" }, modelName(id)), el("span", { class: "mm-sub" }, label.replace(/^[^:]+:\s*/, ""))),
       el("span", { class: "mm-check", "aria-hidden": "true" }, id === cur ? "✓" : ""))),
+    el("hr"),
+    el("div", { class: "mm-head" }, `Steps · up to ${effort()[2]} per request`),
+    el("div", { class: "mm-efforts", role: "radiogroup", "aria-label": "Step budget" }, ...EFFORTS.map(([id, name, n, sub]) =>
+      el("button", { type: "button", class: "mm-effort", role: "radio", "aria-checked": String(id === ef), title: `${sub} (up to ${n} steps)`,
+        onclick: (e) => { e.stopPropagation(); pickEffort(id); } },
+        el("span", { class: "mm-bar", style: `--w:${[2, 4, 6, 9, 13][EFFORTS.findIndex(([x]) => x === id)]}px` }),
+        el("span", { class: "mm-ename" }, name), el("span", { class: "mm-n" }, String(n))))),
+    el("div", { class: "mm-hint" }, (EFFORTS.find(([id]) => id === ef) || EFFORTS[2])[3] + ". Near the end it's told to wrap up, so it always answers."),
     el("hr"),
     el("button", { type: "button", class: "mm-more", role: "menuitem", onclick: () => { closeModelMenu(); openSettings(); } }, "More models in Settings"));
 }

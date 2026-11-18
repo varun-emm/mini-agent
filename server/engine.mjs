@@ -124,8 +124,18 @@ const PROVIDER_IDS = Object.keys(PROVIDERS);
 // Short, friendly names for models, used when two of them debate
 const MODEL_NAMES = { "moonshotai/kimi-k3.1-pro": "Kimi", "anthropic/claude-sonnet-5.5": "Claude", "anthropic/claude-haiku-5.5": "Claude Haiku", "openai/gpt-oss-120b": "GPT-OSS" };
 const modelName = (id) => MODEL_NAMES[id] || String(id || "").split("/").pop().replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-const MAX_STEPS = 60;              // steps per request before it stops and asks to continue
-const HELPER_STEPS = 25;           // steps a helper agent may take
+// How long the agent may work on one request, picked in the brain menu next to Send. Near the end it's told
+// how many steps are left so it wraps up, and its very last step has no tools, so it always gives an answer.
+const EFFORTS = [
+  ["thin", "Thin", 10, "Quick answers and one-file jobs"],
+  ["light", "Light", 20, "Small research or a simple file"],
+  ["medium", "Medium", 40, "Most jobs"],
+  ["thick", "Thick", 70, "Big research or several files"],
+  ["heavy", "Heavy", 120, "The longest jobs (costs the most)"],
+];
+const effort = () => EFFORTS.find(([id]) => id === state.settings.effort) || EFFORTS[2];
+const maxSteps = () => effort()[2];
+const helperSteps = () => Math.max(8, Math.min(30, Math.round(maxSteps() * 0.6)));   // each helper agent
 const MAX_TOOL_OUTPUT = 6000;
 // When the conversation the model sees grows past this many characters, old tool output is shortened
 // and older turns are summarised by the model (instead of being forgotten).
@@ -1116,7 +1126,7 @@ How to work:
 - For any number that matters, use calculator or run_python. Never do important maths in your head.
 - If a tool returns an error, read it, fix your approach, and try again. Don't repeat the exact same failing call.
 - Ask the user a question only when you truly cannot proceed without their input.
-- You can take up to ${MAX_STEPS} steps per request, so finish big jobs properly. In long jobs, older tool output may be shortened and older messages summarised to save space; re-read a file or page if you need its details again.
+- You can take up to ${maxSteps()} steps (tool rounds) on this request, so plan the work to fit: you'll be told when the end is near, and your last step has no tools. In long jobs, older tool output may be shortened and older messages summarised to save space; re-read a file or page if you need its details again.
 
 Planning:
 - For any job with 3 or more steps, call update_plan first with a short plan (3 to 8 steps, plain words). Mark each step active when you start it and done when it's finished, and change the plan if you learn something new. The user watches this checklist.
@@ -1241,10 +1251,24 @@ async function compactContext(msgs, view, signal) {
 // compact (keep the conversation within CONTEXT_CHARS), spawn (starts a helper agent), maxSteps.
 // Returns its final text, or null if it ran out of steps.
 async function agentLoop(msgs, view, signal, opts) {
-  const { system, tools = TOOLS, quiet = false, who = "", compact = false, spawn = null, maxSteps = MAX_STEPS } = opts;
+  const { system, tools = TOOLS, quiet = false, who = "", compact = false, spawn = null } = opts;
+  const limit = opts.maxSteps || maxSteps();
   const tag = (label) => (who ? `${who}: ${label}` : label);
   let badCalls = 0;
-  for (let step = 1; step <= maxSteps; step++) {
+  // Reminders as the step budget runs out (once each), so the model wraps up instead of being cut off
+  const warnAt = new Map([[Math.max(2, Math.floor(limit * 0.75)), "soon"], [Math.max(2, limit - 2), "now"], [limit, "last"]]);
+  for (let step = 1; step <= limit; step++) {
+    const warn = step > 1 ? warnAt.get(step) : null;
+    if (warn) {
+      const left = limit - step + 1;
+      msgs.push({ role: "user", content: warn === "last"
+        ? `[harness note] This is your last step: tools are switched off now. Write your final answer with what you have. Say plainly what's finished and what isn't, and that the user can say "continue" or pick a heavier step budget in the brain menu.`
+        : warn === "now"
+          ? `[harness note] Only ${left} steps left of ${limit}. Stop starting new work: finish or save what's in progress (files included), then give your final answer.`
+          : `[harness note] You've used ${step - 1} of ${limit} steps. Start wrapping up: do only what's needed to finish well, and keep the remaining steps for checking and the final answer.` });
+      if (warn !== "last") view.addStep({ icon: "note", label: tag(`${left} steps left: wrapping up`), detail: `Step budget: ${limit} (${effort()[1]}).` });
+    }
+    const lastStep = step === limit;
     if (compact) await compactContext(msgs, view, signal); else repairToolPairs(msgs);
     // THINK (streamed, so the status can show what's actually going on)
     const thinkStart = Date.now();
@@ -1254,7 +1278,7 @@ async function agentLoop(msgs, view, signal, opts) {
       msg = await streamLLM({
         model: currentModel(),
         messages: [{ role: "system", content: typeof system === "function" ? system() : system }, ...msgs],
-        tools, tool_choice: "auto", temperature: 0.3,
+        tools, tool_choice: lastStep ? "none" : "auto", temperature: 0.3,
       }, signal, {
         reasoning: (chunk, all) => view.thinking(all, chunk.length),
         content: (chunk, all) => (quiet ? view.drafting(chunk.length) : view.answer(all, chunk.length)),
@@ -1275,8 +1299,8 @@ async function agentLoop(msgs, view, signal, opts) {
       view.addStep({ icon: "think", label: tag(`Thought for ${fmtDuration(Date.now() - thinkStart)}`), detail: msg.reasoning });
     }
 
-    // ACT + OBSERVE
-    if (msg.tool_calls && msg.tool_calls.length) {
+    // ACT + OBSERVE (not on the last step: then whatever it wrote is the answer)
+    if (msg.tool_calls && msg.tool_calls.length && !lastStep) {
       if (msg.content) {   // a note to itself before using a tool, not the final answer
         if (!quiet) view.dropAnswer();
         view.addStep({ icon: "note", label: tag(thoughtSnippet(msg.content, 70) || "Planned the next step"), detail: msg.content });
@@ -1322,6 +1346,7 @@ async function agentLoop(msgs, view, signal, opts) {
     }
 
     // CHECK -> DONE
+    if (lastStep && !msg.content) break;             // it still only wanted tools: report that it ran out of steps
     msgs.push({ role: "assistant", content: msg.content || "" });
     return msg.content || "";
   }
@@ -1529,7 +1554,7 @@ async function runTurnOnServer(job, view) {
     const hv = helperView(view, label);
     hv.progress(`Starting: ${thoughtSnippet(task, 60)}`);
     const msgs = [{ role: "user", content: task }];
-    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: helperTools(), quiet: true, who: label, compact: true, maxSteps: HELPER_STEPS });
+    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: helperTools(), quiet: true, who: label, compact: true, maxSteps: helperSteps() });
     if (report === null) return `${label} ran out of steps before finishing. What it had so far:\n${workSummary(msgs, 4000)}`;
     return report || `${label} finished without writing a report.`;
   });
@@ -1546,8 +1571,8 @@ async function runTurnOnServer(job, view) {
     if (debating) view.speaker(modelName(mainModel()) === modelName(reviewModel()) ? `${modelName(mainModel())} (writer)` : modelName(mainModel()), "lead");
     let answer = await agentLoop(state.history, view, signal, { system: systemPrompt, tools: leadTools(), quiet: debating, compact: true, spawn });
     if (answer === null) {
-      state.history.push({ role: "assistant", content: `I stopped after ${MAX_STEPS} steps without finishing.` });
-      return finish({ text: `I stopped after ${MAX_STEPS} steps without finishing. Say "continue" to let me keep going.` });
+      state.history.push({ role: "assistant", content: `I stopped after ${maxSteps()} steps without finishing.` });
+      return finish({ text: `I stopped after ${maxSteps()} steps without finishing. Say "continue" to let me keep going, or pick a heavier step budget in the brain menu.` });
     }
     let debated = null;
     if (debating) {
@@ -1573,4 +1598,4 @@ async function runTurnOnServer(job, view) {
 }
 
 export { APP_VERSION_ENGINE, describe, fileInfo, humanSize, cleanPath, PROVIDERS, TOOLS, executeTool, helperView, thoughtSnippet, debate, modelName, stepDetail, truncate };
-const APP_VERSION_ENGINE = "5.1.1";
+const APP_VERSION_ENGINE = "5.1.2";

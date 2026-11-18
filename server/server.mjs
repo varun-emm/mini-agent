@@ -124,7 +124,7 @@ const DEFAULT_SETTINGS = {
   provider: HAVE[0] || "openrouter",
   models: per("defaultModel"), visionModels: per("visionModel"),
   imageModels: per((P) => P.imageModels[0][0]), videoModels: per((P) => P.videoModels[0][0]),
-  reviewModel: "anthropic/claude-sonnet-5.5", debate: false, memory: true, askBeforeCode: false,
+  reviewModel: "anthropic/claude-sonnet-5.5", debate: false, memory: true, askBeforeCode: false, effort: "medium",
 };
 const isModelId = (s) => typeof s === "string" && /^[\w.\-/:]{3,120}$/.test(s);
 function cleanSettings(s = {}) {
@@ -138,6 +138,7 @@ function cleanSettings(s = {}) {
   if (isModelId(s.videoModel)) out.videoModels.openrouter = s.videoModel;
   if (isModelId(s.reviewModel)) out.reviewModel = s.reviewModel;
   for (const k of ["debate", "memory", "askBeforeCode"]) if (typeof s[k] === "boolean") out[k] = s[k];
+  if (["thin", "light", "medium", "thick", "heavy"].includes(s.effort)) out.effort = s.effort;
   return out;
 }
 function cleanTz(tz) {

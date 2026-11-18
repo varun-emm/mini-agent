@@ -879,3 +879,15 @@ html, body { position: fixed; inset: 0; width: 100%; }
 }
 .composer.landing { animation: composer-in 220ms ease-out; }
 @keyframes composer-in { from { opacity: 0; transform: translate(-50%, 10px); } }
+
+/* step budget in the brain menu */
+.mm-efforts { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; padding: 2px 6px 4px; }
+.model-menu .mm-effort {
+  flex-direction: column; gap: 3px; padding: 8px 2px 6px; border-radius: 12px; align-items: center; text-align: center;
+  background: var(--fill); border: 0.5px solid transparent;
+}
+.model-menu .mm-effort[aria-checked="true"] { background: color-mix(in srgb, var(--blue) 22%, transparent); border-color: color-mix(in srgb, var(--blue) 60%, transparent); }
+.mm-bar { display: block; width: var(--w); height: 16px; border-radius: 3px; background: currentColor; opacity: 0.85; }
+.mm-ename { font-size: 12px; font-weight: 600; }
+.mm-n { font-size: 11px; color: var(--label-2); font-variant-numeric: tabular-nums; }
+.model-menu .mm-hint { font-size: 12px; color: var(--label-2); padding: 2px 12px 6px; line-height: 1.35; }

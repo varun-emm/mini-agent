@@ -48,7 +48,7 @@ The spinner is the rainbow spiral that draws itself (back in v5 after the blue s
 ## Look and controls (v5.1)
 
 - **Credit used** shows under the name: on OpenRouter, how much of all the credit you've bought is spent; on UberLLM (which only reports a balance), how much you've used since your last top-up. Hover or long-press for the dollar amounts. It updates after every reply.
-- **Brain button** (left of Send): switch between your provider's suggested models in one tap; "More models in Settings" for anything else.
+- **Brain button** (left of Send): switch between your provider's suggested models in one tap; "More models in Settings" for anything else. It also sets the **step budget**, how many steps the agent may take per request: Thin 10, Light 20, Medium 40 (default), Thick 70, Heavy 120. At about three-quarters of the budget the model is told to start wrapping up, two steps before the end to stop starting new work, and the last step has tools switched off, so it always finishes with an answer (and says what's left, which you can pick up with "continue").
 - **Incognito** (hat button, top right): a chat that isn't saved to your history or this device and doesn't read or change memory. Tap again, or open another chat, and it's gone.
 - **Menu** (three lines, top left): your chats, **New chat** and Settings.
 - **Settings → Font:** Slab Serif (default), Sans, System, Serif, Rounded or Mono. **Settings → Background:** black (default) or a dark pastel: lavender, sage, rose, slate, peach or teal. The app is always dark.

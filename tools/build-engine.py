@@ -206,7 +206,7 @@ async function runTurnOnServer(job, view) {
     const hv = helperView(view, label);
     hv.progress(`Starting: ${thoughtSnippet(task, 60)}`);
     const msgs = [{ role: "user", content: task }];
-    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: helperTools(), quiet: true, who: label, compact: true, maxSteps: HELPER_STEPS });
+    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: helperTools(), quiet: true, who: label, compact: true, maxSteps: helperSteps() });
     if (report === null) return `${label} ran out of steps before finishing. What it had so far:\n${workSummary(msgs, 4000)}`;
     return report || `${label} finished without writing a report.`;
   });
@@ -223,8 +223,8 @@ async function runTurnOnServer(job, view) {
     if (debating) view.speaker(modelName(mainModel()) === modelName(reviewModel()) ? `${modelName(mainModel())} (writer)` : modelName(mainModel()), "lead");
     let answer = await agentLoop(state.history, view, signal, { system: systemPrompt, tools: leadTools(), quiet: debating, compact: true, spawn });
     if (answer === null) {
-      state.history.push({ role: "assistant", content: `I stopped after ${MAX_STEPS} steps without finishing.` });
-      return finish({ text: `I stopped after ${MAX_STEPS} steps without finishing. Say "continue" to let me keep going.` });
+      state.history.push({ role: "assistant", content: `I stopped after ${maxSteps()} steps without finishing.` });
+      return finish({ text: `I stopped after ${maxSteps()} steps without finishing. Say "continue" to let me keep going, or pick a heavier step budget in the brain menu.` });
     }
     let debated = null;
     if (debating) {
