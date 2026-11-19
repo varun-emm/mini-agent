@@ -50,9 +50,24 @@ The spinner is the rainbow spiral that draws itself (back in v5 after the blue s
 - **Credit used** shows under the name: on OpenRouter, how much of all the credit you've bought is spent; on UberLLM (which only reports a balance), how much you've used since your last top-up. Hover or long-press for the dollar amounts. It updates after every reply.
 - **Brain button** (left of Send): switch between your provider's suggested models in one tap; "More models in Settings" for anything else. It also sets the **step budget**, how many steps the agent may take per request: Thin 10, Light 20, Medium 40 (default), Thick 70, Heavy 120. At about three-quarters of the budget the model is told to start wrapping up, two steps before the end to stop starting new work, and the last step has tools switched off, so it always finishes with an answer (and says what's left, which you can pick up with "continue").
 - **Incognito** (hat button, top right): a chat that isn't saved to your history or this device and doesn't read or change memory. Tap again, or open another chat, and it's gone.
-- **Menu** (three lines, top left): your chats, **New chat** and Settings.
+- **Menu** (three lines, top left, or swipe right anywhere on the chat; swipe left to close): your chats, **New chat** and Settings.
 - **Settings → Font:** Slab Serif (default), Sans, System, Serif, Rounded or Mono. **Settings → Background:** black (default) or a dark pastel: lavender, sage, rose, slate, peach or teal. The app is always dark.
 - On phones the header stays at the top when the keyboard opens: the app shrinks to the space above the keyboard instead of sliding up.
+
+## Safeguards (v5.2)
+
+| Risk | What myGPT does |
+|---|---|
+| A reply quietly costs a lot | Each answer shows what it cost. **Settings → Spending limit per reply** (Off, $0.25, $0.50 default, $1, $2, $5): past it, it stops and asks before spending more; say no and it writes up what it has. Video you already approved doesn't count toward it |
+| A hiccup kills a long job | Server errors, "overloaded", dropped connections and replies that stall for 90 seconds are retried up to 3 times (after 2, 6 and 15 s) |
+| It gets stuck in a loop | The same tool call with the same inputs is refused the 3rd time (unless files changed in between); after 3 errors in a row it's told to change approach |
+| It runs out of steps | Step budgets in the brain menu, with wrap-up warnings and a tool-free last step (v5.1.2) |
+| An answer is cut off by the length limit | It carries on from where it stopped |
+| Runaway helpers or pictures | At most 6 helpers and 8 pictures per reply (more pictures only if you asked for lots) |
+| A web page tries to steer it | Page text is marked as information, not instructions, and memory only saves facts that match what you said in the chat |
+| Chats disappear | The app asks the browser to keep its data, and **Settings → Backup** saves chats, files and memory to one file (keys aren't included); Restore brings them back, on any device |
+
+Also in Settings: **Pictures and video** (a switch that removes the picture and video tools completely), and **Check for updates** (asks the site for its latest version and reloads into it; a new release can take up to 10 minutes to reach your phone).
 
 ## Two providers: OpenRouter and UberLLM (v5)
 

@@ -44,8 +44,8 @@ body = body[:i] + '''async function imageRef(path) {
 rep("  if (ctx.onImage) { try { ctx.onImage((await toJpeg(new Blob([bytes], { type: mime }))).src); } catch (_) { /* preview only */ } }",
     "  if (ctx.onImage) { try { ctx.onImage(await thumbnail(files.abs(name), 1100, \"jpeg\")); } catch (_) { /* preview only */ } }")
 # the price check before a video is answered from the phone
-i = body.index("function confirmVideo(text) {"); j = body.index("async function makeVideo(", i)
-body = body[:i] + "const confirmVideo = (text) => state.ask(\"video\", text);\n" + body[j:]
+i = body.index("function confirmVideo("); j = body.index("async function makeVideo(", i)
+body = body[:i] + "const confirmVideo = (text) => state.ask(\"video\", text);\nconst confirmSpend = (text) => state.ask(\"spend\", text);\n" + body[j:]
 # Python, files and screenshots run on the server
 rep('''    const r = await python.run(code, python.warmed ? 90000 : 240000, ctx.onProgress);
     if (!r.ok) return "Error: " + r.error;
@@ -195,6 +195,7 @@ async function runTurnOnServer(job, view) {
   state.history.push(turnMsg);
   const turn = { kind: "agent", text: "", steps: [], files: [], ms: 0 };
   view.bind(turn);
+  resetSpend();
   const started = Date.now();
   const before = files.snapshot();
   const changedFiles = () => { const now = files.snapshot(); return [...now.keys()].filter((p) => before.get(p) !== now.get(p)); };
@@ -216,6 +217,7 @@ async function runTurnOnServer(job, view) {
     Object.assign(turn, patch);
     turn.ms = Date.now() - started;
     turn.files = changedFiles();
+    if (state.spend && state.spend.total > 0) { turn.cost = state.spend.total; turn.costEst = state.spend.estimated; }
     return { turn, history: state.history, memory: state.memory };
   };
 

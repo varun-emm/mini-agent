@@ -891,3 +891,12 @@ html, body { position: fixed; inset: 0; width: 100%; }
 .mm-ename { font-size: 12px; font-weight: 600; }
 .mm-n { font-size: 11px; color: var(--label-2); font-variant-numeric: tabular-nums; }
 .model-menu .mm-hint { font-size: 12px; color: var(--label-2); padding: 2px 12px 6px; line-height: 1.35; }
+
+/* v5.2: no gap under the message bar while the keyboard is open (the home-bar space is under the keyboard then) */
+.kb-open .composer { bottom: 6px; }
+.kb-open .chat { padding-bottom: 92px; }
+.kb-open .bottom-edge { height: 80px; }
+/* spending-limit chips */
+.chips { display: flex; flex-wrap: wrap; gap: 8px; padding: 12px 14px; }
+.chip { border: 0.5px solid var(--glass-border); background: var(--fill); color: var(--label); border-radius: 999px; padding: 7px 14px; font-size: 15px; font-weight: 500; }
+.chip[aria-checked="true"] { background: var(--blue); border-color: var(--blue); color: #fff; }

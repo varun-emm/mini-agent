@@ -21,7 +21,7 @@
     // apply the saved look before anything paints (no flash of the wrong font or colour)
     try { const a = JSON.parse(localStorage.getItem("ma.look") || "{}"); if (a.font) document.documentElement.dataset.font = a.font; if (a.bg) document.documentElement.dataset.bg = a.bg; } catch (_) {}
   </script>
-  <link rel="stylesheet" href="styles.css?v=5.1.2">
+  <link rel="stylesheet" href="styles.css?v=5.2.0">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -157,6 +157,17 @@
       </div>
 
       <div class="group">
+        <div class="group-head">Pictures and video</div>
+        <div class="cells">
+          <label class="cell cell-toggle">
+            <span>Make pictures and videos</span>
+            <input type="checkbox" class="switch" id="mediaInput">
+          </label>
+        </div>
+        <div class="group-foot">When off, the agent can't use picture or video models at all (charts and drawings made with Python still work).</div>
+      </div>
+
+      <div class="group media-only">
         <div class="group-head">Picture model</div>
         <div class="cells">
           <div id="imageList" role="radiogroup" aria-label="Picture model"></div>
@@ -167,7 +178,7 @@
         </div>
       </div>
 
-      <div class="group">
+      <div class="group media-only">
         <div class="group-head">Video model</div>
         <div class="cells">
           <div id="videoList" role="radiogroup" aria-label="Video model"></div>
@@ -177,6 +188,14 @@
           </label>
         </div>
         <div class="group-foot" id="mediaFoot"></div>
+      </div>
+
+      <div class="group">
+        <div class="group-head">Spending limit per reply</div>
+        <div class="cells">
+          <div class="chips" id="capList" role="radiogroup" aria-label="Spending limit"></div>
+        </div>
+        <div class="group-foot">When one reply costs more than this, it stops and asks before spending more. Each answer shows what it cost.</div>
       </div>
 
       <div class="group">
@@ -192,6 +211,24 @@
           <div class="swatches" id="bgList" role="radiogroup" aria-label="Background colour"></div>
         </div>
         <div class="group-foot" id="bgFoot"></div>
+      </div>
+
+      <div class="group">
+        <div class="group-head">Backup</div>
+        <div class="cells">
+          <button class="cell cell-action" id="exportBtn" type="button">Back up chats, files and memory</button>
+          <button class="cell cell-action" id="importBtn" type="button">Restore from a backup</button>
+          <input type="file" id="importFile" accept="application/json,.json" hidden>
+        </div>
+        <div class="group-foot" id="backupFoot">Your chats live only on this device. Save a backup now and then (to Files or iCloud Drive).</div>
+      </div>
+
+      <div class="group">
+        <div class="group-head">Updates</div>
+        <div class="cells">
+          <button class="cell cell-action" id="updateBtn" type="button">Check for updates</button>
+        </div>
+        <div class="group-foot" id="updateFoot"></div>
       </div>
 
       <div class="group">
@@ -315,6 +352,6 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-  <script src="app.js?v=5.1.2"></script>
+  <script src="app.js?v=5.2.0"></script>
 </body>
 </html>
