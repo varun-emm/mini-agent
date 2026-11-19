@@ -21,7 +21,7 @@
     // apply the saved look before anything paints (no flash of the wrong font or colour)
     try { const a = JSON.parse(localStorage.getItem("ma.look") || "{}"); if (a.font) document.documentElement.dataset.font = a.font; if (a.bg) document.documentElement.dataset.bg = a.bg; } catch (_) {}
   </script>
-  <link rel="stylesheet" href="styles.css?v=5.2.1">
+  <link rel="stylesheet" href="styles.css?v=5.2.2">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -34,9 +34,14 @@
         <span class="nav-name">myGPT<span class="nav-ver" id="version"></span></span>
         <span class="nav-sub-row"><span class="nav-sub" id="subtitle"></span></span>
       </button>
-      <button class="glass-btn" id="incognitoBtn" type="button" aria-label="Incognito chat" aria-pressed="false">
-        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5h18"/><path d="M5.5 11.5 7.2 5.6a1 1 0 0 1 1.4-.6l1.9 1a3.2 3.2 0 0 0 3 0l1.9-1a1 1 0 0 1 1.4.6l1.7 5.9"/><circle cx="7.6" cy="16.6" r="2.6"/><circle cx="16.4" cy="16.6" r="2.6"/><path d="M10.2 16.4c1.1-.7 2.5-.7 3.6 0"/></svg>
-      </button>
+      <div class="nav-right">
+        <button class="glass-btn" id="incognitoBtn" type="button" aria-label="Incognito chat" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 11.5h18"/><path d="M5.5 11.5 7.2 5.6a1 1 0 0 1 1.4-.6l1.9 1a3.2 3.2 0 0 0 3 0l1.9-1a1 1 0 0 1 1.4.6l1.7 5.9"/><circle cx="7.6" cy="16.6" r="2.6"/><circle cx="16.4" cy="16.6" r="2.6"/><path d="M10.2 16.4c1.1-.7 2.5-.7 3.6 0"/></svg>
+        </button>
+        <button class="glass-btn nav-new" id="newChatBtn" type="button" aria-label="New chat">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-6"/><path d="M17.6 3.6a2 2 0 0 1 2.8 2.8L12 14.8 8.8 15.2l.4-3.2Z"/></svg>
+        </button>
+      </div>
     </header>
 
     <main class="chat" id="chat">
@@ -352,6 +357,6 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-  <script src="app.js?v=5.2.1"></script>
+  <script src="app.js?v=5.2.2"></script>
 </body>
 </html>

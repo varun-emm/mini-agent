@@ -4,10 +4,11 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "5.2.1";
+const APP_VERSION = "5.2.2";
 // Each release gets its own name, shown next to the number and on the new-chat screen.
-// So far: 5.1.0-5.2.0 Novus, 5.2.1 Sol.
-const VERSION_NAME = "Sol";
+// Names are made up for myGPT (never an existing product's name). So far: 5.1.0-5.2.0 Novus, 5.2.1-5.2.2 Aurelis.
+// Ideas for later: Opalis, Astrion, Lumora, Veyra.
+const VERSION_NAME = "Aurelis";
 
 // ---------------------------------------------------------------------------
 // The providers: OpenRouter and UberLLM. Both reach many models (Kimi, Claude, GPT and more) with one key
@@ -3280,7 +3281,7 @@ function updateSubtitle() {
       parts.push(el("span", { class: `credit${pct >= 90 ? " low" : pct >= 75 ? " warn" : ""}`, title: (c.detail || "") + (tok ? `. ${tok.note}` : "") },
         tok ? "" : el("span", { class: "credit-bar", style: `--used:${pct.toFixed(1)}%` }, el("i")),
         `${pct < 10 && pct > 0 ? pct.toFixed(1) : Math.round(pct)}% ${tok ? "used" : "credit used"}`,
-        tok ? el("span", { class: "credit-tok" }, `(${tok.left} of ${tok.total} tokens left)`) : ""));
+        tok ? el("span", { class: "credit-tok" }, `(${tok.left} of ${tok.total} left)`) : ""));
     } else if (c && c.text) parts.push(el("span", { class: "credit", title: c.detail || "" }, c.text));
   }
   if (state.incognito) parts.push(el("span", { class: "incognito-tag" }, "Incognito"));
@@ -3308,7 +3309,7 @@ function creditTokens(c) {
   if (p === undefined) { modelPrice(pid, model).then((x) => { if (x) updateSubtitle(); }).catch(() => {}); return null; }
   if (!p || !(p.input > 0 || p.output > 0)) return null;
   const perToken = (0.9 * p.input + 0.1 * p.output) / 1e6;
-  return { left: fmtTokens(c.left / perToken), total: fmtTokens(c.total / perToken),
+  return { left: Math.floor(c.left / perToken).toLocaleString("en-US"), total: fmtTokens(c.total / perToken),
     note: `Tokens for ${modelName(model)} at its current price, counting 9 tokens read for every 1 written (typical for agent work); writing-heavy replies use credit faster` };
 }
 const usd = (x) => `$${x >= 100 ? x.toFixed(0) : x.toFixed(2)}`;
@@ -3688,6 +3689,7 @@ ui.input.addEventListener("input", () => { autosize(); updateSendState(); });
 // Incognito: a chat that isn't saved to your history or this device, and doesn't use or change memory.
 // Tap again (or open any chat) to leave it; it's gone once you do.
 document.getElementById("incognitoBtn").addEventListener("click", () => newChat(!state.incognito));
+document.getElementById("newChatBtn").addEventListener("click", () => newChat(false));
 
 
 // ---------------------------------------------------------------------------

@@ -1768,4 +1768,4 @@ async function runTurnOnServer(job, view) {
 }
 
 export { APP_VERSION_ENGINE, describe, fileInfo, humanSize, cleanPath, PROVIDERS, TOOLS, executeTool, helperView, thoughtSnippet, debate, modelName, stepDetail, truncate };
-const APP_VERSION_ENGINE = "5.2.1";
+const APP_VERSION_ENGINE = "5.2.2";
