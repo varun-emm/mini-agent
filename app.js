@@ -4,9 +4,10 @@
 
 // The release number shown next to the title. Bump it (and the ?v= tags in index.html) on every release,
 // and add a line to CHANGELOG.md. major = big redesign, minor = new feature, patch = fix.
-const APP_VERSION = "5.2.0";
-// Each release also gets a name, shown next to the number (and on the new-chat screen). 5.1-5.2: Novus.
-const VERSION_NAME = "Novus";
+const APP_VERSION = "5.2.1";
+// Each release gets its own name, shown next to the number and on the new-chat screen.
+// So far: 5.1.0-5.2.0 Novus, 5.2.1 Sol.
+const VERSION_NAME = "Sol";
 
 // ---------------------------------------------------------------------------
 // The providers: OpenRouter and UberLLM. Both reach many models (Kimi, Claude, GPT and more) with one key
@@ -3275,9 +3276,11 @@ function updateSubtitle() {
     const c = credit.info && credit.pid === providerId() ? credit.info : null;
     if (c && typeof c.usedPct === "number") {
       const pct = Math.max(0, Math.min(100, c.usedPct));
-      parts.push(el("span", { class: `credit${pct >= 90 ? " low" : pct >= 75 ? " warn" : ""}`, title: c.detail || "" },
-        el("span", { class: "credit-bar", style: `--used:${pct.toFixed(1)}%` }, el("i")),
-        `${pct < 10 && pct > 0 ? pct.toFixed(1) : Math.round(pct)}% credit used`));
+      const tok = creditTokens(c);
+      parts.push(el("span", { class: `credit${pct >= 90 ? " low" : pct >= 75 ? " warn" : ""}`, title: (c.detail || "") + (tok ? `. ${tok.note}` : "") },
+        tok ? "" : el("span", { class: "credit-bar", style: `--used:${pct.toFixed(1)}%` }, el("i")),
+        `${pct < 10 && pct > 0 ? pct.toFixed(1) : Math.round(pct)}% ${tok ? "used" : "credit used"}`,
+        tok ? el("span", { class: "credit-tok" }, `(${tok.left} of ${tok.total} tokens left)`) : ""));
     } else if (c && c.text) parts.push(el("span", { class: "credit", title: c.detail || "" }, c.text));
   }
   if (state.incognito) parts.push(el("span", { class: "incognito-tag" }, "Incognito"));
@@ -3295,11 +3298,24 @@ function updateSubtitle() {
 //   Connected to your server: the server asks with its key.
 // ---------------------------------------------------------------------------
 const credit = { info: null, pid: null, at: 0, busy: false };
+// Credit turned into tokens for the model you're using, at its live price. An agent's calls are mostly
+// reading (the conversation, pages, files) with a little writing, so it assumes 9 tokens in for every 1 out.
+const fmtTokens = (n) => (n >= 1e9 ? `${(n / 1e9).toFixed(n >= 1e10 ? 0 : 1)}B` : n >= 1e6 ? `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}K` : String(Math.round(n)));
+function creditTokens(c) {
+  if (!(c.total > 0)) return null;
+  const pid = providerId(), model = mainModel();
+  const p = typeof priceCache !== "undefined" ? priceCache[`${pid}|${model}`] : undefined;
+  if (p === undefined) { modelPrice(pid, model).then((x) => { if (x) updateSubtitle(); }).catch(() => {}); return null; }
+  if (!p || !(p.input > 0 || p.output > 0)) return null;
+  const perToken = (0.9 * p.input + 0.1 * p.output) / 1e6;
+  return { left: fmtTokens(c.left / perToken), total: fmtTokens(c.total / perToken),
+    note: `Tokens for ${modelName(model)} at its current price, counting 9 tokens read for every 1 written (typical for agent work); writing-heavy replies use credit faster` };
+}
 const usd = (x) => `$${x >= 100 ? x.toFixed(0) : x.toFixed(2)}`;
 function creditFrom(raw, pid) {
   if (!raw) return null;
   if (typeof raw.total === "number" && raw.total > 0 && typeof raw.used === "number") {
-    return { usedPct: (raw.used / raw.total) * 100, detail: `${usd(raw.used)} of ${usd(raw.total)} used on ${PROVIDERS[pid].name}` };
+    return { usedPct: (raw.used / raw.total) * 100, left: Math.max(0, raw.total - raw.used), total: raw.total, detail: `${usd(raw.used)} of ${usd(raw.total)} used on ${PROVIDERS[pid].name}` };
   }
   if (typeof raw.balance === "number") {
     if (raw.balance <= 0) return { usedPct: 100, detail: `No credit left on ${PROVIDERS[pid].name}. Top up at uberllm.dev` };
@@ -3307,7 +3323,7 @@ function creditFrom(raw, pid) {
     const key = (serverOn() ? "server:" : "") + pid;
     if (!(bases[key] >= raw.balance)) { bases[key] = raw.balance; store.set("ma.creditBase", bases); }   // a top-up (or the first look)
     const base = bases[key];
-    if (base > 0) return { usedPct: ((base - raw.balance) / base) * 100, detail: `${usd(raw.balance)} left of ${usd(base)} since your last top-up on ${PROVIDERS[pid].name}` };
+    if (base > 0) return { usedPct: ((base - raw.balance) / base) * 100, left: raw.balance, total: base, detail: `${usd(raw.balance)} left of ${usd(base)} since your last top-up on ${PROVIDERS[pid].name}` };
     return { text: `${usd(raw.balance)} left`, detail: "" };
   }
   if (typeof raw.used === "number") return { text: `${usd(raw.used)} used`, detail: `Spent so far on ${PROVIDERS[pid].name}` };
@@ -4272,15 +4288,30 @@ function renderModelMenu() {
       el("span", { class: "mm-text" }, el("span", { class: "mm-name" }, modelName(id)), el("span", { class: "mm-sub" }, label.replace(/^[^:]+:\s*/, ""))),
       el("span", { class: "mm-check", "aria-hidden": "true" }, id === cur ? "✓" : ""))),
     el("hr"),
-    el("div", { class: "mm-head" }, `Steps · up to ${effort()[2]} per request`),
-    el("div", { class: "mm-efforts", role: "radiogroup", "aria-label": "Step budget" }, ...EFFORTS.map(([id, name, n, sub]) =>
+    el("div", { class: "mm-head", id: "effortHead" }, `Steps · up to ${effort()[2]} per request`),
+    el("div", { class: "mm-efforts", role: "radiogroup", "aria-label": "Step budget" }, ...EFFORTS.map(([id, name, n, sub], i) =>
       el("button", { type: "button", class: "mm-effort", role: "radio", "aria-checked": String(id === ef), title: `${sub} (up to ${n} steps)`,
         onclick: (e) => { e.stopPropagation(); pickEffort(id); } },
-        el("span", { class: "mm-bar", style: `--w:${[2, 4, 6, 9, 13][EFFORTS.findIndex(([x]) => x === id)]}px` }),
+        el("span", { class: "mm-dot-box" }, el("span", { class: "mm-dot", style: `--d:${EFFORT_DOTS[i]}px` })),
         el("span", { class: "mm-ename" }, name), el("span", { class: "mm-n" }, String(n))))),
-    el("div", { class: "mm-hint" }, (EFFORTS.find(([id]) => id === ef) || EFFORTS[2])[3] + ". Near the end it's told to wrap up, so it always answers."),
+    // or slide through them
+    el("input", { type: "range", class: "mm-slider", min: "0", max: String(EFFORTS.length - 1), step: "1", value: String(EFFORTS.findIndex(([id]) => id === ef)),
+      "aria-label": "Step budget", onclick: (e) => e.stopPropagation(),
+      oninput: (e) => showEffort(Number(e.target.value)),
+      onchange: (e) => pickEffort(EFFORTS[Number(e.target.value)][0]) }),
+    el("div", { class: "mm-hint", id: "effortHint" }, effortHint(ef)),
     el("hr"),
     el("button", { type: "button", class: "mm-more", role: "menuitem", onclick: () => { closeModelMenu(); openSettings(); } }, "More models in Settings"));
+}
+const EFFORT_DOTS = [6, 9, 12, 15, 19];   // the dot for each step budget, bigger = more steps
+const effortHint = (id) => (EFFORTS.find(([x]) => x === id) || EFFORTS[2])[3] + ". Near the end it's told to wrap up, so it always answers.";
+// while the slider moves: light up the matching dot and words (saved when you let go)
+function showEffort(i) {
+  const [id, , n] = EFFORTS[i];
+  modelMenu.querySelectorAll(".mm-effort").forEach((b, k) => b.setAttribute("aria-checked", String(k === i)));
+  const head = document.getElementById("effortHead"), hint = document.getElementById("effortHint");
+  if (head) head.textContent = `Steps · up to ${n} per request`;
+  if (hint) hint.textContent = effortHint(id);
 }
 function openModelMenu() { renderModelMenu(); modelMenu.hidden = false; modelBtn.setAttribute("aria-expanded", "true"); }
 function closeModelMenu() { modelMenu.hidden = true; modelBtn.setAttribute("aria-expanded", "false"); }

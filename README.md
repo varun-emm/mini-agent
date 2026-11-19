@@ -4,7 +4,7 @@ A personal AI agent that runs in your browser on [OpenRouter](https://openrouter
 
 **Open it:** https://varun-emm.github.io/mini-agent/ (after the one-time setup below)
 
-The version number and its name (5.1 is "Novus") are shown next to the title. See [CHANGELOG.md](CHANGELOG.md) for what changed in each one.
+The version number and its name are shown next to the title. Every release gets its own name: 5.1.0 to 5.2.0 were "Novus", 5.2.1 is "Sol". See [CHANGELOG.md](CHANGELOG.md) for what changed in each one.
 
 ## What it can do
 
@@ -47,8 +47,8 @@ The spinner is the rainbow spiral that draws itself (back in v5 after the blue s
 
 ## Look and controls (v5.1)
 
-- **Credit used** shows under the name: on OpenRouter, how much of all the credit you've bought is spent; on UberLLM (which only reports a balance), how much you've used since your last top-up. Hover or long-press for the dollar amounts. It updates after every reply.
-- **Brain button** (left of Send): switch between your provider's suggested models in one tap; "More models in Settings" for anything else. It also sets the **step budget**, how many steps the agent may take per request: Thin 10, Light 20, Medium 40 (default), Thick 70, Heavy 120. At about three-quarters of the budget the model is told to start wrapping up, two steps before the end to stop starting new work, and the last step has tools switched off, so it always finishes with an answer (and says what's left, which you can pick up with "continue").
+- **Credit used** shows under the name, with the **tokens left** for your current model in brackets, e.g. "37% used (6.0M of 9.5M tokens left)". Tokens are worked out from the model's live price, counting 9 tokens read for every 1 written, which is typical for agent work; replies that write a lot use credit faster. The percentage is: on OpenRouter, how much of all the credit you've bought is spent; on UberLLM (which only reports a balance), how much you've used since your last top-up. Hover or long-press for the dollar amounts. It updates after every reply.
+- **Brain button** (left of Send): switch between your provider's suggested models in one tap; "More models in Settings" for anything else. It also sets the **step budget** (tap a dot, bigger dot = more steps, or use the slider), how many steps the agent may take per request: Thin 10, Light 20, Medium 40 (default), Thick 70, Heavy 120. At about three-quarters of the budget the model is told to start wrapping up, two steps before the end to stop starting new work, and the last step has tools switched off, so it always finishes with an answer (and says what's left, which you can pick up with "continue").
 - **Incognito** (hat button, top right): a chat that isn't saved to your history or this device and doesn't read or change memory. Tap again, or open another chat, and it's gone.
 - **Menu** (three lines, top left, or swipe right anywhere on the chat; swipe left to close): your chats, **New chat** and Settings.
 - **Settings → Font:** Slab Serif (default), Sans, System, Serif, Rounded or Mono. **Settings → Background:** black (default) or a dark pastel: lavender, sage, rose, slate, peach or teal. The app is always dark.
