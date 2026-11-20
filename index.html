@@ -21,7 +21,7 @@
     // apply the saved look before anything paints (no flash of the wrong font or colour)
     try { const a = JSON.parse(localStorage.getItem("ma.look") || "{}"); if (a.font) document.documentElement.dataset.font = a.font; if (a.bg) document.documentElement.dataset.bg = a.bg; } catch (_) {}
   </script>
-  <link rel="stylesheet" href="styles.css?v=5.2.2">
+  <link rel="stylesheet" href="styles.css?v=5.3.0">
 </head>
 <body>
   <div class="ambient" aria-hidden="true"><i></i><i></i><i></i></div>
@@ -195,6 +195,25 @@
         <div class="group-foot" id="mediaFoot"></div>
       </div>
 
+      <div class="group" id="connGroup">
+        <div class="group-head">Connections</div>
+        <div class="cells" id="connRows" hidden></div>
+        <div class="cells spaced">
+          <div class="chips conn-add" id="connAdd"></div>
+        </div>
+        <div class="cells spaced" id="connForm" hidden>
+          <label class="cell cell-input"><span class="sr-only">Name</span><input id="connName" placeholder="Name (e.g. Linear)" autocapitalize="words" autocomplete="off"></label>
+          <label class="cell cell-input"><span class="sr-only">Address</span><input id="connUrl" type="url" placeholder="https://…/mcp" spellcheck="false" autocapitalize="off" autocomplete="off"></label>
+          <label class="cell cell-input"><span class="sr-only">Key</span><input id="connKey" type="password" spellcheck="false" autocapitalize="off" autocomplete="off"></label>
+          <div class="cell conn-actions"><span id="connKeyLink" class="cell-sub"></span><button type="button" class="bar-btn" id="connCancel">Cancel</button><button type="button" class="bar-btn strong" id="connSave">Connect</button></div>
+        </div>
+        <div class="cells spaced" id="connPaste" hidden>
+          <label class="cell cell-input"><span class="sr-only">Sign-in link</span><input id="connPasteInput" placeholder="Paste the sign-in link here" spellcheck="false" autocapitalize="off" autocomplete="off"></label>
+          <button type="button" class="cell cell-action" id="connPasteBtn">Finish signing in</button>
+        </div>
+        <div class="group-foot" id="connFoot"></div>
+      </div>
+
       <div class="group">
         <div class="group-head">Spending limit per reply</div>
         <div class="cells">
@@ -357,6 +376,6 @@
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
   <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js"></script>
-  <script src="app.js?v=5.2.2"></script>
+  <script src="app.js?v=5.3.0"></script>
 </body>
 </html>

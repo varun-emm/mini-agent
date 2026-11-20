@@ -70,6 +70,30 @@ The spinner is the rainbow spiral that draws itself (back in v5 after the blue s
 
 Also in Settings: **Pictures and video** (a switch that removes the picture and video tools completely), and **Check for updates** (asks the site for its latest version and reloads into it; a new release can take up to 10 minutes to reach your phone).
 
+## Connections: plug in other apps with MCP (v5.3)
+
+Settings → Connections plugs other apps into myGPT using MCP (Model Context Protocol), the standard way for an AI to use a service's tools. Tap a preset or **+ Other** and paste any MCP server address.
+
+| App | How you connect | Works from |
+|---|---|---|
+| Exa | Nothing to sign in | Phone and server |
+| Notion | Sign in with Notion | Phone and server |
+| Canva | Sign in with Canva | Phone and server |
+| GitHub | Paste a GitHub token (`github_pat_…`) | Phone and server |
+| Kite (Zerodha) | Its login tool gives a link to open | Your server only (Kite blocks browsers). Read-only: order tools are blocked |
+| Any other | Its address, plus a key or sign-in if it needs one | Wherever it allows |
+
+Mailchimp can't be added: its sign-in only accepts Claude and ChatGPT.
+
+How it behaves:
+- **Opened only when needed.** The agent sees a list of what's connected and opens an app (`use_connector`) only when a request needs it, so its tools don't cost tokens on every message.
+- **Asks first.** Anything that sends, posts, creates, changes, deletes, orders or spends shows an "Allow this?" prompt with the details, on the phone and through your server. Tools the app marks read-only run straight away.
+- **App text is information, not instructions**, like web pages.
+- **Sign-ins** use OAuth with PKCE. Passes are saved only on this device (never in backups) and renewed automatically. A job sends them to your server, which uses them for that job and doesn't store them.
+- On an iPhone home-screen app, sign-in may finish in Safari instead of the app. If so, Safari shows the link to copy; paste it in Settings → Connections → Finish signing in.
+
+MCP itself is free. Some apps charge for their own plan (Exa has a free allowance), and the tool results the model reads count as normal tokens.
+
 ## Two providers: OpenRouter and UberLLM (v5)
 
 Pick one in **Settings → Provider**. Chat, pictures and video all go through it, and each provider keeps its own key, models, picture model and video model, so you can switch back and forth.

@@ -141,6 +141,13 @@ function cleanSettings(s = {}) {
   if (["thin", "light", "medium", "thick", "heavy"].includes(s.effort)) out.effort = s.effort;
   if (typeof s.spendCap === "number" && s.spendCap >= 0 && s.spendCap <= 100) out.spendCap = s.spendCap;
   if (typeof s.media === "boolean") out.media = s.media;
+  // connected apps (MCP) and their sign-in passes, for this job only (never stored on the server)
+  out.connectors = (Array.isArray(s.connectors) ? s.connectors : []).slice(0, 12).filter((c) => c && typeof c.url === "string" && /^https?:\/\//.test(c.url)).map((c) => {
+    let blocked = typeof c.blocked === "string" ? c.blocked.slice(0, 300) : "";
+    try { new RegExp(blocked); } catch (_) { blocked = "^$never"; }
+    return { id: String(c.id || "app").slice(0, 40), name: String(c.name || "App").slice(0, 40), url: c.url.slice(0, 500),
+      about: String(c.about || "").slice(0, 300), blocked, token: String(c.token || "").slice(0, 8000) };
+  });
   return out;
 }
 function cleanTz(tz) {
@@ -388,7 +395,7 @@ function readBalance(result) {
 }
 
 // what the app shows in Settings: version, brain, and which providers this server has keys for
-const about = () => ({ version: VERSION, providers: HAVE, ...brain.info() });
+const about = () => ({ version: VERSION, providers: HAVE, mcp: true, ...brain.info() });
 
 function streamEvents(req, res, job, after) {
   res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-store", "X-Accel-Buffering": "no", Connection: "keep-alive" });

@@ -915,3 +915,10 @@ html, body { position: fixed; inset: 0; width: 100%; }
 .credit-tok { color: var(--label-2); }
 .nav-right .nav-new { background: color-mix(in srgb, var(--base) 70%, #3a3a3e); border: 0.5px solid var(--glass-border); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5); }
 .chat { padding-top: calc(env(safe-area-inset-top) + var(--nav-h) + 62px); }
+
+/* v5.3 Connections (MCP) */
+.conn-row .switch { margin-left: 4px; }
+.conn-row .bar-btn { flex: none; }
+.conn-add { padding: 10px 12px; background: var(--cell); flex-wrap: wrap; }
+.conn-actions { justify-content: flex-end; gap: 8px; }
+.conn-actions .cell-sub { flex: 1; }

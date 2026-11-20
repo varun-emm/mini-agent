@@ -45,7 +45,7 @@ rep("  if (ctx.onImage) { try { ctx.onImage((await toJpeg(new Blob([bytes], { ty
     "  if (ctx.onImage) { try { ctx.onImage(await thumbnail(files.abs(name), 1100, \"jpeg\")); } catch (_) { /* preview only */ } }")
 # the price check before a video is answered from the phone
 i = body.index("function confirmVideo("); j = body.index("async function makeVideo(", i)
-body = body[:i] + "const confirmVideo = (text) => state.ask(\"video\", text);\nconst confirmSpend = (text) => state.ask(\"spend\", text);\n" + body[j:]
+body = body[:i] + "const confirmVideo = (text) => state.ask(\"video\", text);\nconst confirmSpend = (text) => state.ask(\"spend\", text);\nconst confirmConnector = (text) => state.ask(\"connector\", text);\n" + body[j:]
 # Python, files and screenshots run on the server
 rep('''    const r = await python.run(code, python.warmed ? 90000 : 240000, ctx.onProgress);
     if (!r.ok) return "Error: " + r.error;
@@ -73,8 +73,10 @@ rep('''- For fpdf2 PDFs, use the provided Unicode font so symbols like ₹ work:
     '''- For fpdf2 PDFs, use the provided Unicode font so symbols like ₹ work: pdf.add_font("DejaVu", "", FONT_REGULAR); pdf.add_font("DejaVu", "B", FONT_BOLD); pdf.set_font("DejaVu", size=11). FONT_REGULAR and FONT_BOLD are already defined in your Python.''')
 rep('''- To see what a web page looks like, screenshot its URL. The free web screenshot service allows about 25 a day, so use it only when looking matters.''',
     '''- To see what a web page looks like, screenshot its URL. The server is slow, so use it only when looking matters.''')
+# connected apps see the server's version
+rep('clientInfo: { name: "myGPT", version: APP_VERSION } }', 'clientInfo: { name: "myGPT", version: APP_VERSION_ENGINE } }')
 # helpers and debate reach the job's spawner through the job state
-rep("tools: leadTools(), quiet: true, who: L, spawn: debate.spawn });", "tools: leadTools(), quiet: true, who: L, spawn: state.spawn });")
+rep("tools: () => [...leadTools(), ...connectorTools()], quiet: true, who: L, spawn: debate.spawn });", "tools: () => [...leadTools(), ...connectorTools()], quiet: true, who: L, spawn: state.spawn });")
 # sizes come from the file system, without reading whole files
 body = re.sub(r'files\.get\(([^()]*)\)\.bytes\.length', r'files.get(\1).size', body)
 # phone-only pieces that must not be copied
@@ -207,7 +209,7 @@ async function runTurnOnServer(job, view) {
     const hv = helperView(view, label);
     hv.progress(`Starting: ${thoughtSnippet(task, 60)}`);
     const msgs = [{ role: "user", content: task }];
-    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: helperTools(), quiet: true, who: label, compact: true, maxSteps: helperSteps() });
+    const report = await agentLoop(msgs, hv, sig, { system: helperPrompt, tools: () => [...helperTools(), ...connectorTools()], quiet: true, who: label, compact: true, maxSteps: helperSteps() });
     if (report === null) return `${label} ran out of steps before finishing. What it had so far:\n${workSummary(msgs, 4000)}`;
     return report || `${label} finished without writing a report.`;
   });
@@ -223,7 +225,7 @@ async function runTurnOnServer(job, view) {
 
   try {
     if (debating) view.speaker(modelName(mainModel()) === modelName(reviewModel()) ? `${modelName(mainModel())} (writer)` : modelName(mainModel()), "lead");
-    let answer = await agentLoop(state.history, view, signal, { system: systemPrompt, tools: leadTools(), quiet: debating, compact: true, spawn });
+    let answer = await agentLoop(state.history, view, signal, { system: systemPrompt, tools: () => [...leadTools(), ...connectorTools()], quiet: debating, compact: true, spawn });
     if (answer === null) {
       state.history.push({ role: "assistant", content: `I stopped after ${maxSteps()} steps without finishing.` });
       return finish({ text: `I stopped after ${maxSteps()} steps without finishing. Say "continue" to let me keep going, or pick a heavier step budget in the brain menu.` });
