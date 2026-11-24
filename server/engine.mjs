@@ -98,7 +98,7 @@ const PROVIDERS = {
     searchModel: "openai/gpt-oss-120b",         // cheap model + OpenRouter's "web" plugin
     visionModel: "anthropic/claude-haiku-5.5",
     visionModels: [["anthropic/claude-haiku-5.5", "Sharp at reading documents"], ["moonshotai/kimi-k3.1-pro", "Kimi reads images too"], ["openai/gpt-6-luna", "Fast and cheap"]],
-    models: [["moonshotai/kimi-k3.1-pro", "Kimi K3.1 Pro: strongest at long jobs"], ["anthropic/claude-sonnet-5.5", "Claude: careful and clear"], ["openai/gpt-oss-120b", "Cheapest, about 10x less"]],
+    models: [["moonshotai/kimi-k3.1-pro", "Kimi K3.1 Pro: strongest at long jobs"], ["anthropic/claude-sonnet-5.5", "Claude: careful and clear"], ["deepseek/deepseek-v4.1-flash", "DeepSeek V4.1 Flash: fast, about 20x cheaper"], ["xiaomi/mimo-v2.6-flash", "MiMo V2.6 Flash: fast, reads images, about 30x cheaper"], ["openai/gpt-oss-120b", "Cheapest, about 30x less"]],
     imageModels: [["google/gemini-3.1-flash-image", "Quick and cheap, good at edits"], ["openai/gpt-image-2", "Best at text inside images"], ["black-forest-labs/flux-3-image", "Photorealistic"]],
     videoModels: [["google/veo-3.1-fast", "Good quality with sound, fair price"], ["google/veo-3.1", "Best quality, costs about 4x more"], ["kwaivgi/kling-v3.0-std", "Smooth motion, low price"], ["alibaba/wan-3.0", "Budget, clips up to 30 seconds"]],
   },
@@ -122,7 +122,7 @@ const PROVIDERS = {
 };
 const PROVIDER_IDS = Object.keys(PROVIDERS);
 // Short, friendly names for models, used when two of them debate
-const MODEL_NAMES = { "moonshotai/kimi-k3.1-pro": "Kimi", "anthropic/claude-sonnet-5.5": "Claude", "anthropic/claude-haiku-5.5": "Claude Haiku", "openai/gpt-oss-120b": "GPT-OSS" };
+const MODEL_NAMES = { "moonshotai/kimi-k3.1-pro": "Kimi", "anthropic/claude-sonnet-5.5": "Claude", "anthropic/claude-haiku-5.5": "Claude Haiku", "openai/gpt-oss-120b": "GPT-OSS", "deepseek/deepseek-v4.1-flash": "DeepSeek", "xiaomi/mimo-v2.6-flash": "MiMo" };
 const modelName = (id) => MODEL_NAMES[id] || String(id || "").split("/").pop().replace(/[-_]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 // How long the agent may work on one request, picked in the brain menu next to Send. Near the end it's told
 // how many steps are left so it wraps up, and its very last step has no tools, so it always gives an answer.
@@ -1955,4 +1955,4 @@ async function runTurnOnServer(job, view) {
 }
 
 export { APP_VERSION_ENGINE, describe, fileInfo, humanSize, cleanPath, PROVIDERS, TOOLS, executeTool, helperView, thoughtSnippet, debate, modelName, stepDetail, truncate };
-const APP_VERSION_ENGINE = "5.3.0";
+const APP_VERSION_ENGINE = "5.3.1";

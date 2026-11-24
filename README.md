@@ -205,7 +205,7 @@ Every file the agent makes shows up under its answer as a card. Charts and image
 2. **Get a key** from OpenRouter (https://openrouter.ai/settings/keys, starts with `sk-or-`) or UberLLM (https://uberllm.dev, starts with `ull_`) and add a few dollars of credit. Picture and video models need more than $1 of credit.
 3. **Open the app** and paste your key; it picks the right provider from the key. It's saved only in that browser, never in this repo. Add the other provider's key later in Settings if you want both.
 
-myGPT was called myGPT until v5. Your chats, files, memory and settings carried over.
+myGPT was called Mini Agent until v5. Your chats, files, memory and settings carried over.
 
 ## Choosing a model
 
@@ -213,7 +213,9 @@ myGPT was called myGPT until v5. Your chats, files, memory and settings carried 
 |---|---|---|
 | Kimi K3.1 Pro | `moonshotai/kimi-k3.1-pro` | Default. Strongest at long, multi-step jobs; reads images; 1M-token context. Settings shows its live price on your provider |
 | Claude Sonnet 5.5 | `anthropic/claude-sonnet-5.5` | Careful and clear; the default reviewer in Debate mode |
-| GPT-OSS 120B | `openai/gpt-oss-120b` | Cheapest, roughly 10x less than Kimi, but weaker at long jobs |
+| DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash` | OpenRouter. Fast; reads images; output about 20x cheaper than Kimi |
+| MiMo V2.6 Flash | `xiaomi/mimo-v2.6-flash` | OpenRouter. Fast; reads images; output about 30x cheaper than Kimi |
+| GPT-OSS 120B | `openai/gpt-oss-120b` | Cheapest, roughly 30x less than Kimi, but weaker at long jobs |
 
 Any OpenRouter or UberLLM model that supports tool calling works: type its ID in **Settings → Model → Other model ID**. Filter by "Tools" at https://openrouter.ai/models.
 
