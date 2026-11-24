@@ -6,7 +6,7 @@ Numbering: **major** for a big redesign, **minor** for a new feature, **patch** 
 
 | Version | Date | What changed | Commit |
 |---|---|---|---|
-| 5.3.1 "Kindrel" | 2026-11-24 | Two more OpenRouter models to pick from: DeepSeek V4.1 Flash and MiMo V2.6 Flash, both fast and far cheaper than Kimi | — |
+| 5.3.1 "Kindrel" | 2026-11-24 | Two more OpenRouter models to pick from: DeepSeek V4.1 Flash and MiMo V2.6 Flash, both fast and far cheaper than Kimi | [4cf5d92](https://github.com/varun-emm/mini-agent/commit/4cf5d92) |
 | 5.3.0 "Kindrel" | 2026-11-20 | Connections (MCP): plug other apps into myGPT from Settings. Presets for Exa, Notion, Canva, GitHub and Kite, or any MCP address with a key or sign-in. The agent opens an app only when a request needs it, asks before anything that sends, changes or spends, and Kite stays read-only. Works on the phone and through your server | [8cd6332](https://github.com/varun-emm/mini-agent/commit/8cd6332) |
 | 5.2.2 "Aurelis" | 2026-11-19 | Release names are now made up for myGPT, never an existing product's name. Tokens left are shown exactly, e.g. "37% used (6,893,821 of 9.5M left)". A New chat button sits under the incognito button | [307cb51](https://github.com/varun-emm/mini-agent/commit/307cb51) |
 | 5.2.1 "Aurelis" | 2026-11-19 | Every release now gets its own name (this one was briefly called Sol, renamed Aurelis because release names must be original). The header shows tokens left next to credit used, e.g. "37% used (6.0M of 9.5M tokens left)", worked out for your current model at its live price. Step budgets are shown as dots that grow with the budget, and there's a slider under them | [2da34de](https://github.com/varun-emm/mini-agent/commit/2da34de) |
